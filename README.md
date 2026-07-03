@@ -19,6 +19,17 @@
 - 支持亮色、暗色和跟随系统主题。
 - 支持 60 秒和 30 秒刷新频率。
 
+## Codex CLI 定位
+
+桌面应用从 Explorer 或开始菜单启动时，可能拿不到终端里的 PATH。应用会主动查找常见 Codex CLI 位置，包括：
+
+- `PATH` 中的 `codex.exe`、`codex.cmd`、`codex.bat`、`codex.ps1`
+- `C:\Program Files\nodejs`
+- `%APPDATA%\npm`
+- `%LOCALAPPDATA%\Programs\nodejs`
+
+如果 Codex 安装在自定义路径，可以设置环境变量 `CODEX_USAGE_BALL_CODEX_PATH`，指向实际的 `codex.cmd` 或 `codex.ps1`。
+
 ## 开发命令
 
 ```bash

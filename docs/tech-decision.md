@@ -29,6 +29,16 @@ account/rateLimits/read
 - `planType`
 - `rateLimitsByLimitId`
 
+## Codex CLI 启动策略
+
+桌面应用不能假设 GUI 启动环境继承终端 PATH。后端会按以下顺序定位 Codex CLI：
+
+1. 读取 `CODEX_USAGE_BALL_CODEX_PATH` 指向的显式路径。
+2. 扫描当前进程 PATH。
+3. 扫描常见 Node 全局目录，例如 `C:\Program Files\nodejs` 和 `%APPDATA%\npm`。
+
+Windows 下优先支持 `codex.cmd`；如果只找到 `codex.ps1`，则通过 PowerShell 启动。
+
 ## 安全原则
 
 - 不读取 `~/.codex/auth.json`。
