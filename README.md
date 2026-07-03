@@ -1,14 +1,25 @@
-# codex-usage-ball
+# Codex 用量悬浮球
 
-一个用于查看 Codex 账户用量窗口的 Windows 悬浮球工具。
+一个用于查看 Codex 账户用量窗口的 Windows 悬浮球工具。目标是在桌面常驻显示短期窗口、长期窗口、重置时间和 credits 状态，减少反复打开 Codex 设置页的操作。
 
-当前仓库先完成初始化。功能范围、交互细节和技术方案会在讨论确认后补充到 `docs/`。
+## 技术选型
 
-## 初步方向
+- Tauri 2
+- React 19
+- TypeScript
+- Vite
+- pnpm
+- Rust 后端命令调用 `codex app-server --listen stdio://`
 
-- 通过 `codex app-server` 读取 Codex rate limits。
-- 在 Windows 桌面显示常驻悬浮球或托盘状态。
-- 显示 5 小时窗口、周窗口、重置时间和 credits 状态。
+## 开发命令
+
+```bash
+pnpm install
+pnpm dev
+pnpm tauri dev
+```
+
+当前本机还需要安装 Rust/Cargo 后才能运行 `pnpm tauri dev`。只预览前端界面可以先运行 `pnpm dev`。
 
 ## 许可证
 
