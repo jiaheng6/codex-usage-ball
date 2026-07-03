@@ -11,6 +11,14 @@
 - pnpm
 - Rust 后端命令调用 `codex app-server --listen stdio://`
 
+## 当前能力
+
+- 读取并展示 Codex rate limits。
+- 展示短期窗口、长期窗口、Credits、模型用量桶和更新时间。
+- 支持中文和英文界面切换。
+- 支持亮色、暗色和跟随系统主题。
+- 支持 60 秒和 30 秒刷新频率。
+
 ## 开发命令
 
 ```bash
