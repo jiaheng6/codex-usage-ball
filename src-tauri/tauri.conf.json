@@ -15,12 +15,13 @@
         "label": "ball",
         "title": "Codex 用量悬浮球",
         "url": "index.html?window=ball",
-        "width": 132,
-        "height": 132,
+        "width": 112,
+        "height": 112,
         "resizable": false,
         "decorations": false,
         "alwaysOnTop": true,
         "transparent": true,
+        "shadow": false,
         "center": true,
         "skipTaskbar": true
       },
@@ -28,12 +29,13 @@
         "label": "main",
         "title": "Codex 用量",
         "url": "index.html?window=main",
-        "width": 390,
+        "width": 356,
         "height": 580,
         "resizable": false,
         "decorations": false,
         "alwaysOnTop": true,
         "transparent": true,
+        "shadow": false,
         "center": true,
         "visible": false
       },
@@ -46,6 +48,8 @@
         "resizable": false,
         "decorations": false,
         "alwaysOnTop": true,
+        "transparent": true,
+        "shadow": false,
         "center": true,
         "visible": false
       }
@@ -56,7 +60,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

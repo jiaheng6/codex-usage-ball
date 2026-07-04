@@ -1,0 +1,55 @@
+name: 发布安装包
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "发布 tag，例如 v0.1.0"
+        required: true
+        default: "v0.1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: 构建 Windows 安装包
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 运行测试
+        run: pnpm test
+
+      - name: 构建并上传 Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: Codex 用量悬浮球 ${{ github.event.inputs.tag || github.ref_name }}
+          releaseBody: 自动构建的 Windows 安装包。
+          releaseDraft: false
+          prerelease: false

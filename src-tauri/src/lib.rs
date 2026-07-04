@@ -3,14 +3,15 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Mutex};
 use std::time::Duration;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, WindowEvent};
+use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, Position, Window, WindowEvent};
 
 const BALL_WINDOW_LABEL: &str = "ball";
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -20,6 +21,321 @@ const MENU_SHOW_MAIN: &str = "show_main_panel";
 const MENU_TOGGLE_BALL: &str = "toggle_usage_ball";
 const MENU_SHOW_SETTINGS: &str = "show_settings";
 const MENU_EXIT: &str = "exit_app";
+const WINDOW_STATE_FILE: &str = "window-positions.json";
+const RIGHT_SNAP_DISTANCE_PX: i32 = 24;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredWindowPosition {
+    x: i32,
+    y: i32,
+    snapped_to_right: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WindowSize {
+    width: i32,
+    height: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WorkArea {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WindowPositionStore {
+    ball: Option<StoredWindowPosition>,
+    main: Option<StoredWindowPosition>,
+    settings: Option<StoredWindowPosition>,
+}
+
+impl WindowPositionStore {
+    fn set(&mut self, label: &str, position: StoredWindowPosition) -> bool {
+        let slot = match label {
+            BALL_WINDOW_LABEL => &mut self.ball,
+            MAIN_WINDOW_LABEL => &mut self.main,
+            SETTINGS_WINDOW_LABEL => &mut self.settings,
+            _ => return false,
+        };
+
+        if *slot == Some(position) {
+            return false;
+        }
+
+        *slot = Some(position);
+        true
+    }
+}
+
+fn right_edge_x(work_area: WorkArea, size: WindowSize) -> i32 {
+    work_area.x + (work_area.width - size.width).max(0)
+}
+
+fn bottom_edge_y(work_area: WorkArea, size: WindowSize) -> i32 {
+    work_area.y + (work_area.height - size.height).max(0)
+}
+
+fn center_y(work_area: WorkArea, size: WindowSize) -> i32 {
+    work_area.y + (work_area.height - size.height).max(0) / 2
+}
+
+fn clamp_window_position(
+    position: StoredWindowPosition,
+    work_area: WorkArea,
+    size: WindowSize,
+) -> StoredWindowPosition {
+    StoredWindowPosition {
+        x: position.x.clamp(work_area.x, right_edge_x(work_area, size)),
+        y: position
+            .y
+            .clamp(work_area.y, bottom_edge_y(work_area, size)),
+        snapped_to_right: position.snapped_to_right,
+    }
+}
+
+fn snap_ball_to_right(
+    position: StoredWindowPosition,
+    work_area: WorkArea,
+    size: WindowSize,
+) -> StoredWindowPosition {
+    let clamped = clamp_window_position(position, work_area, size);
+    StoredWindowPosition {
+        x: right_edge_x(work_area, size),
+        y: clamped.y,
+        snapped_to_right: true,
+    }
+}
+
+fn restore_ball_position(
+    saved: Option<StoredWindowPosition>,
+    work_area: WorkArea,
+    size: WindowSize,
+) -> StoredWindowPosition {
+    match saved {
+        Some(position) if position.snapped_to_right => {
+            snap_ball_to_right(position, work_area, size)
+        }
+        Some(position) => {
+            let mut clamped = clamp_window_position(position, work_area, size);
+            clamped.snapped_to_right = false;
+            clamped
+        }
+        None => snap_ball_to_right(
+            StoredWindowPosition {
+                x: right_edge_x(work_area, size),
+                y: center_y(work_area, size),
+                snapped_to_right: true,
+            },
+            work_area,
+            size,
+        ),
+    }
+}
+
+fn settle_ball_position(
+    position: StoredWindowPosition,
+    work_area: WorkArea,
+    size: WindowSize,
+) -> StoredWindowPosition {
+    let clamped = clamp_window_position(position, work_area, size);
+    let distance_to_right = (right_edge_x(work_area, size) - clamped.x).abs();
+
+    if distance_to_right <= RIGHT_SNAP_DISTANCE_PX {
+        snap_ball_to_right(clamped, work_area, size)
+    } else {
+        StoredWindowPosition {
+            snapped_to_right: false,
+            ..clamped
+        }
+    }
+}
+
+fn clamp_panel_position(
+    position: StoredWindowPosition,
+    work_area: WorkArea,
+    size: WindowSize,
+) -> StoredWindowPosition {
+    StoredWindowPosition {
+        snapped_to_right: false,
+        ..clamp_window_position(position, work_area, size)
+    }
+}
+
+fn stored_position_from_physical(position: PhysicalPosition<i32>) -> StoredWindowPosition {
+    StoredWindowPosition {
+        x: position.x,
+        y: position.y,
+        snapped_to_right: false,
+    }
+}
+
+fn window_size_from_physical(size: PhysicalSize<u32>) -> WindowSize {
+    WindowSize {
+        width: size.width.min(i32::MAX as u32) as i32,
+        height: size.height.min(i32::MAX as u32) as i32,
+    }
+}
+
+fn work_area_from_monitor(monitor: &tauri::Monitor) -> WorkArea {
+    let work_area = monitor.work_area();
+    WorkArea {
+        x: work_area.position.x,
+        y: work_area.position.y,
+        width: work_area.size.width.min(i32::MAX as u32) as i32,
+        height: work_area.size.height.min(i32::MAX as u32) as i32,
+    }
+}
+
+fn window_state_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|err| format!("无法获取应用配置目录：{err}"))?;
+
+    fs::create_dir_all(&config_dir).map_err(|err| format!("无法创建应用配置目录：{err}"))?;
+    Ok(config_dir.join(WINDOW_STATE_FILE))
+}
+
+fn load_window_position_store(app: &AppHandle) -> WindowPositionStore {
+    let Ok(path) = window_state_path(app) else {
+        return WindowPositionStore::default();
+    };
+
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+fn save_window_position_store(app: &AppHandle, store: &WindowPositionStore) -> Result<(), String> {
+    let path = window_state_path(app)?;
+    let content =
+        serde_json::to_string_pretty(store).map_err(|err| format!("窗口位置序列化失败：{err}"))?;
+    fs::write(path, content).map_err(|err| format!("窗口位置保存失败：{err}"))
+}
+
+fn monitor_for_window(window: &Window) -> Option<tauri::Monitor> {
+    window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten())
+}
+
+fn restore_window_positions(app: &AppHandle) {
+    let store = app
+        .state::<Mutex<WindowPositionStore>>()
+        .lock()
+        .ok()
+        .map(|store| store.clone());
+    let Some(store) = store else {
+        return;
+    };
+
+    if let Some(window) = app.get_webview_window(BALL_WINDOW_LABEL) {
+        if let (Some(monitor), Ok(size)) = (
+            window
+                .current_monitor()
+                .ok()
+                .flatten()
+                .or_else(|| window.primary_monitor().ok().flatten()),
+            window.outer_size(),
+        ) {
+            let position = restore_ball_position(
+                store.ball,
+                work_area_from_monitor(&monitor),
+                window_size_from_physical(size),
+            );
+            let _ = window.set_position(Position::Physical(PhysicalPosition::new(
+                position.x, position.y,
+            )));
+        }
+    }
+
+    for (label, saved_position) in [
+        (MAIN_WINDOW_LABEL, store.main),
+        (SETTINGS_WINDOW_LABEL, store.settings),
+    ] {
+        let Some(position) = saved_position else {
+            continue;
+        };
+        let Some(window) = app.get_webview_window(label) else {
+            continue;
+        };
+        let Some(monitor) = window
+            .current_monitor()
+            .ok()
+            .flatten()
+            .or_else(|| window.primary_monitor().ok().flatten())
+        else {
+            continue;
+        };
+        let Ok(size) = window.outer_size() else {
+            continue;
+        };
+        let position = clamp_panel_position(
+            position,
+            work_area_from_monitor(&monitor),
+            window_size_from_physical(size),
+        );
+        let _ = window.set_position(Position::Physical(PhysicalPosition::new(
+            position.x, position.y,
+        )));
+    }
+}
+
+fn handle_window_moved(window: &Window, position: PhysicalPosition<i32>) {
+    let label = window.label();
+    if ![BALL_WINDOW_LABEL, MAIN_WINDOW_LABEL, SETTINGS_WINDOW_LABEL].contains(&label) {
+        return;
+    }
+
+    let Some(monitor) = monitor_for_window(window) else {
+        return;
+    };
+    let Ok(size) = window.outer_size() else {
+        return;
+    };
+
+    let work_area = work_area_from_monitor(&monitor);
+    let size = window_size_from_physical(size);
+    let stored = stored_position_from_physical(position);
+    let settled = if label == BALL_WINDOW_LABEL {
+        settle_ball_position(stored, work_area, size)
+    } else {
+        clamp_panel_position(stored, work_area, size)
+    };
+
+    if settled.x != position.x || settled.y != position.y {
+        let _ = window.set_position(Position::Physical(PhysicalPosition::new(
+            settled.x, settled.y,
+        )));
+    }
+
+    let app = window.app_handle();
+    let Ok(store) = app
+        .state::<Mutex<WindowPositionStore>>()
+        .lock()
+        .map(|mut store| {
+            if store.set(label, settled) {
+                Some(store.clone())
+            } else {
+                None
+            }
+        })
+    else {
+        return;
+    };
+
+    if let Some(store) = store {
+        let _ = save_window_position_store(&app, &store);
+    }
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -446,21 +762,28 @@ fn exit_app(app: AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            let position_store = load_window_position_store(app.handle());
+            app.manage(Mutex::new(position_store));
+            restore_window_positions(app.handle());
             install_tray(app.handle())?;
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                match window.label() {
-                    BALL_WINDOW_LABEL | MAIN_WINDOW_LABEL | SETTINGS_WINDOW_LABEL => {
-                        api.prevent_close();
-                        let _ = window.hide();
-                    }
-                    _ => {}
+        .on_window_event(|window, event| match event {
+            WindowEvent::Moved(position) => handle_window_moved(window, *position),
+            WindowEvent::CloseRequested { api, .. } => match window.label() {
+                BALL_WINDOW_LABEL | MAIN_WINDOW_LABEL | SETTINGS_WINDOW_LABEL => {
+                    api.prevent_close();
+                    let _ = window.hide();
                 }
-            }
+                _ => {}
+            },
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             read_rate_limits,
@@ -472,4 +795,108 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("Codex 用量悬浮球启动失败");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn work_area() -> WorkArea {
+        WorkArea {
+            x: 0,
+            y: 24,
+            width: 1920,
+            height: 1040,
+        }
+    }
+
+    fn ball_size() -> WindowSize {
+        WindowSize {
+            width: 112,
+            height: 112,
+        }
+    }
+
+    #[test]
+    fn 小球没有保存位置时默认吸附在右侧边缘() {
+        let position = restore_ball_position(None, work_area(), ball_size());
+
+        assert_eq!(
+            position,
+            StoredWindowPosition {
+                x: 1808,
+                y: 488,
+                snapped_to_right: true,
+            }
+        );
+    }
+
+    #[test]
+    fn 小球拖离右侧边缘后保持自由位置() {
+        let position = settle_ball_position(
+            StoredWindowPosition {
+                x: 640,
+                y: 300,
+                snapped_to_right: true,
+            },
+            work_area(),
+            ball_size(),
+        );
+
+        assert_eq!(
+            position,
+            StoredWindowPosition {
+                x: 640,
+                y: 300,
+                snapped_to_right: false,
+            }
+        );
+    }
+
+    #[test]
+    fn 小球释放在右侧边缘附近时重新吸附() {
+        let position = settle_ball_position(
+            StoredWindowPosition {
+                x: 1792,
+                y: 300,
+                snapped_to_right: false,
+            },
+            work_area(),
+            ball_size(),
+        );
+
+        assert_eq!(
+            position,
+            StoredWindowPosition {
+                x: 1808,
+                y: 300,
+                snapped_to_right: true,
+            }
+        );
+    }
+
+    #[test]
+    fn 面板位置会被限制在显示器工作区内() {
+        let position = clamp_panel_position(
+            StoredWindowPosition {
+                x: 1900,
+                y: -80,
+                snapped_to_right: false,
+            },
+            work_area(),
+            WindowSize {
+                width: 356,
+                height: 580,
+            },
+        );
+
+        assert_eq!(
+            position,
+            StoredWindowPosition {
+                x: 1564,
+                y: 24,
+                snapped_to_right: false,
+            }
+        );
+    }
 }

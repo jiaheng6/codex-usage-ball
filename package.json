@@ -2,15 +2,33 @@
   "name": "codex-usage-ball",
   "private": true,
   "version": "0.1.0",
+  "description": "Codex 用量悬浮球：桌面查看 Codex 5 小时和 7 天额度窗口",
+  "keywords": [
+    "codex",
+    "openai-codex",
+    "codex-cli",
+    "codex-usage",
+    "usage-monitor",
+    "tauri",
+    "desktop-widget",
+    "floating-ball",
+    "windows"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jiaheng6/codex-usage-ball.git"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test": "vitest run",
     "preview": "vite preview",
     "tauri": "tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-autostart": "^2.5.1",
     "@tauri-apps/plugin-opener": "^2",
     "lucide-react": "^1.23.0",
     "react": "^19.1.0",
@@ -22,6 +40,7 @@
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
     "typescript": "~5.8.3",
-    "vite": "^7.0.4"
+    "vite": "^7.0.4",
+    "vitest": "^4.1.9"
   }
 }

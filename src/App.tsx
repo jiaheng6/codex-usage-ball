@@ -1,5 +1,16 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type MouseEvent,
+  type PointerEvent,
+  type ReactNode,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow, PhysicalPosition } from "@tauri-apps/api/window";
 import {
   AlertTriangle,
   ChevronDown,
@@ -13,7 +24,20 @@ import {
   Sun,
   X,
 } from "lucide-react";
+import {
+  disable as disableAutostart,
+  enable as enableAutostart,
+  isEnabled as isAutostartEnabled,
+} from "@tauri-apps/plugin-autostart";
 import "./App.css";
+import {
+  defaultSettings,
+  normalizeAppSettings,
+  type AppSettings,
+  type Language,
+  type ResolvedTheme,
+  type ThemeMode,
+} from "./settings";
 
 type RateLimitWindow = {
   usedPercent: number;
@@ -43,16 +67,7 @@ type RateLimitsResponse = {
 };
 
 type LoadState = "idle" | "loading" | "ready" | "error";
-type Language = "zh-CN" | "en-US";
-type ThemeMode = "system" | "light" | "dark";
-type ResolvedTheme = "light" | "dark";
 type WindowKind = "ball" | "main" | "settings";
-
-type AppSettings = {
-  language: Language;
-  themeMode: ThemeMode;
-  refreshIntervalSec: 30 | 60;
-};
 
 type Copy = {
   appAria: string;
@@ -94,8 +109,12 @@ type Copy = {
   lowNotice: string;
   noticeAt15: string;
   startup: string;
+  enableStartup: string;
+  disableStartup: string;
   comingSoon: string;
   unknown: string;
+  windowFiveHoursShort: string;
+  windowSevenDaysShort: string;
   windowFiveHours: string;
   windowSevenDays: string;
   minuteWindow: (value: number) => string;
@@ -104,12 +123,7 @@ type Copy = {
 
 const STORAGE_KEY = "codex-usage-ball-settings";
 const SETTINGS_CHANGED_EVENT = "codex-usage-ball-settings-changed";
-
-const defaultSettings: AppSettings = {
-  language: "zh-CN",
-  themeMode: "system",
-  refreshIntervalSec: 60,
-};
+const DRAG_START_THRESHOLD_PX = 5;
 
 const copy: Record<Language, Copy> = {
   "zh-CN": {
@@ -137,7 +151,7 @@ const copy: Record<Language, Copy> = {
     waiting: "等待数据",
     updated: (time) => `${time} 更新`,
     settings: "设置",
-    exit: "退出",
+    exit: "退出程序",
     settingsTitle: "偏好设置",
     close: "关闭",
     language: "语言",
@@ -152,8 +166,12 @@ const copy: Record<Language, Copy> = {
     lowNotice: "低额度通知",
     noticeAt15: "低于 15% 提醒",
     startup: "开机自启",
+    enableStartup: "开启",
+    disableStartup: "关闭",
     comingSoon: "稍后接入",
     unknown: "未知",
+    windowFiveHoursShort: "5小时",
+    windowSevenDaysShort: "7天",
     windowFiveHours: "5 小时窗口",
     windowSevenDays: "7 天窗口",
     minuteWindow: (value) => `${value} 分钟窗口`,
@@ -184,7 +202,7 @@ const copy: Record<Language, Copy> = {
     waiting: "Waiting for data",
     updated: (time) => `Updated ${time}`,
     settings: "Settings",
-    exit: "Exit",
+    exit: "Exit app",
     settingsTitle: "Preferences",
     close: "Close",
     language: "Language",
@@ -199,8 +217,12 @@ const copy: Record<Language, Copy> = {
     lowNotice: "Low-limit alert",
     noticeAt15: "Alert below 15%",
     startup: "Launch at login",
+    enableStartup: "On",
+    disableStartup: "Off",
     comingSoon: "Coming later",
     unknown: "Unknown",
+    windowFiveHoursShort: "5h",
+    windowSevenDaysShort: "7d",
     windowFiveHours: "5-hour window",
     windowSevenDays: "7-day window",
     minuteWindow: (value) => `${value}-minute window`,
@@ -279,13 +301,7 @@ function readSettings(): AppSettings {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return defaultSettings;
 
-    const parsed = JSON.parse(raw) as Partial<AppSettings>;
-    return {
-      language: parsed.language === "en-US" ? "en-US" : "zh-CN",
-      themeMode:
-        parsed.themeMode === "light" || parsed.themeMode === "dark" ? parsed.themeMode : "system",
-      refreshIntervalSec: parsed.refreshIntervalSec === 30 ? 30 : 60,
-    };
+    return normalizeAppSettings(JSON.parse(raw));
   } catch {
     return defaultSettings;
   }
@@ -340,6 +356,10 @@ function getTone(percent: number | null) {
   return "good";
 }
 
+function formatBallPercent(percent: number | null) {
+  return percent === null ? "--" : `${percent}%`;
+}
+
 function getSystemTheme(): ResolvedTheme {
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
@@ -359,6 +379,17 @@ function useAppSettings() {
       return next;
     });
   }, []);
+
+  const setLaunchAtLogin = useCallback(async (launchAtLogin: boolean) => {
+    if (isTauriRuntime()) {
+      if (launchAtLogin) {
+        await enableAutostart();
+      } else {
+        await disableAutostart();
+      }
+    }
+    updateSettings({ launchAtLogin });
+  }, [updateSettings]);
 
   useEffect(() => {
     const syncSettings = () => setSettings(readSettings());
@@ -383,6 +414,23 @@ function useAppSettings() {
     return () => query.removeEventListener("change", handleChange);
   }, []);
 
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+
+    let disposed = false;
+    void isAutostartEnabled()
+      .then((launchAtLogin) => {
+        if (!disposed) updateSettings({ launchAtLogin });
+      })
+      .catch((err) => {
+        console.error("同步开机自启状态失败", err);
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, [updateSettings]);
+
   const resolvedTheme = resolveTheme(settings.themeMode, systemTheme);
   const text = copy[settings.language];
 
@@ -391,7 +439,7 @@ function useAppSettings() {
     document.documentElement.lang = settings.language;
   }, [resolvedTheme, settings.language]);
 
-  return { settings, updateSettings, resolvedTheme, text };
+  return { settings, updateSettings, setLaunchAtLogin, resolvedTheme, text };
 }
 
 function useUsageData(refreshIntervalSec: 30 | 60) {
@@ -455,7 +503,7 @@ function WindowMetric({
   );
 }
 
-function ChoiceButton<T extends string | number>({
+function ChoiceButton<T extends string | number | boolean>({
   active,
   children,
   onClick,
@@ -481,10 +529,12 @@ function SettingsFields({
   settings,
   text,
   updateSettings,
+  setLaunchAtLogin,
 }: {
   settings: AppSettings;
   text: Copy;
   updateSettings: (patch: Partial<AppSettings>) => void;
+  setLaunchAtLogin: (enabled: boolean) => Promise<void>;
 }) {
   return (
     <section className="settings-fields">
@@ -573,7 +623,22 @@ function SettingsFields({
 
       <div className="setting-row inline-setting">
         <span>{text.startup}</span>
-        <em>{text.comingSoon}</em>
+        <div className="segmented">
+          <ChoiceButton
+            active={settings.launchAtLogin}
+            onClick={(launchAtLogin: boolean) => void setLaunchAtLogin(launchAtLogin)}
+            value={true}
+          >
+            {text.enableStartup}
+          </ChoiceButton>
+          <ChoiceButton
+            active={!settings.launchAtLogin}
+            onClick={(launchAtLogin: boolean) => void setLaunchAtLogin(launchAtLogin)}
+            value={false}
+          >
+            {text.disableStartup}
+          </ChoiceButton>
+        </div>
       </div>
     </section>
   );
@@ -582,22 +647,124 @@ function SettingsFields({
 function BallView() {
   const { settings, resolvedTheme, text } = useAppSettings();
   const { usage, state } = useUsageData(settings.refreshIntervalSec);
+  const dragStartRef = useRef<{
+    x: number;
+    y: number;
+    dragging: boolean;
+    pointerId: number;
+    scaleFactor: number;
+    windowX: number;
+    windowY: number;
+    ready: boolean;
+  } | null>(null);
+  const suppressClickRef = useRef(false);
   const activeLimit = usage?.rateLimits ?? null;
   const primaryRemaining = remainingPercent(activeLimit?.primary ?? null);
+  const secondaryRemaining = remainingPercent(activeLimit?.secondary ?? null);
   const primaryTone = getTone(primaryRemaining);
+  const secondaryTone = getTone(secondaryRemaining);
+  const primaryPercentText = formatBallPercent(primaryRemaining);
+  const secondaryPercentText = formatBallPercent(secondaryRemaining);
+  const ballStyle = {
+    "--ball-primary-progress": `${primaryRemaining ?? 0}`,
+    "--ball-secondary-progress": `${secondaryRemaining ?? 0}`,
+  } as CSSProperties;
+  const ballTitle = `${text.openMainPanel} · ${text.windowFiveHoursShort} ${primaryPercentText} · ${text.windowSevenDaysShort} ${secondaryPercentText}`;
+
+  const resetDragState = useCallback((event?: PointerEvent<HTMLButtonElement>) => {
+    if (event?.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    dragStartRef.current = null;
+    window.setTimeout(() => {
+      suppressClickRef.current = false;
+    }, 0);
+  }, []);
+
+  const handleBallPointerDown = useCallback((event: PointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    suppressClickRef.current = false;
+    dragStartRef.current = {
+      x: event.screenX,
+      y: event.screenY,
+      dragging: false,
+      pointerId: event.pointerId,
+      scaleFactor: window.devicePixelRatio || 1,
+      windowX: 0,
+      windowY: 0,
+      ready: false,
+    };
+
+    const appWindow = getCurrentWindow();
+    void Promise.all([appWindow.outerPosition(), appWindow.scaleFactor()])
+      .then(([position, scaleFactor]) => {
+        const start = dragStartRef.current;
+        if (!start || start.pointerId !== event.pointerId) return;
+        start.windowX = position.x;
+        start.windowY = position.y;
+        start.scaleFactor = scaleFactor;
+        start.ready = true;
+      })
+      .catch(() => {
+        resetDragState(event);
+      });
+  }, [resetDragState]);
+
+  const handleBallPointerMove = useCallback((event: PointerEvent<HTMLButtonElement>) => {
+    const start = dragStartRef.current;
+    if (!start) return;
+
+    const distance = Math.hypot(event.screenX - start.x, event.screenY - start.y);
+    if (!start.dragging && distance < DRAG_START_THRESHOLD_PX) return;
+    if (!start.ready) return;
+
+    start.dragging = true;
+    suppressClickRef.current = true;
+    const nextX = Math.round(start.windowX + (event.screenX - start.x) * start.scaleFactor);
+    const nextY = Math.round(start.windowY + (event.screenY - start.y) * start.scaleFactor);
+    void getCurrentWindow().setPosition(new PhysicalPosition(nextX, nextY));
+  }, [resetDragState]);
+
+  const handleBallClick = useCallback((event: MouseEvent<HTMLButtonElement>) => {
+    if (suppressClickRef.current) {
+      event.preventDefault();
+      return;
+    }
+    void invoke("show_main_panel");
+  }, []);
 
   return (
-    <main className="ball-shell" data-tauri-drag-region data-theme={resolvedTheme}>
+    <main className="ball-shell" data-theme={resolvedTheme}>
       <button
-        className={`usage-ball compact-ball usage-ball-${primaryTone}`}
+        className={`usage-ball compact-ball usage-ball-${primaryTone} usage-ball-secondary-${secondaryTone}`}
         type="button"
         aria-label={text.openMainPanel}
-        title={text.openMainPanel}
-        onClick={() => void invoke("show_main_panel")}
+        title={ballTitle}
+        style={ballStyle}
+        onClick={handleBallClick}
+        onPointerCancel={resetDragState}
+        onPointerDown={handleBallPointerDown}
+        onPointerMove={handleBallPointerMove}
+        onPointerUp={resetDragState}
       >
-        <span>{primaryRemaining === null ? "--" : primaryRemaining}</span>
-        <small>%</small>
-        <b>{state === "loading" ? text.loading : text.ballLabel}</b>
+        <svg className="ball-ring-outer" viewBox="0 0 112 112" aria-hidden="true">
+          <circle className="ball-ring-track" cx="56" cy="56" r="50" pathLength="100" />
+          <circle className="ball-ring-progress" cx="56" cy="56" r="50" pathLength="100" />
+        </svg>
+        <span className="ball-core">
+          <span className="ball-window-label">{text.windowFiveHoursShort}</span>
+          <span className="ball-primary-value">{primaryPercentText}</span>
+        </span>
+        <span className="ball-secondary-card" aria-label={`${text.windowSevenDaysShort} ${secondaryPercentText}`}>
+          <svg className="ball-ring-inner" viewBox="0 0 44 44" aria-hidden="true">
+            <circle className="ball-ring-secondary-track" cx="22" cy="22" r="18" pathLength="100" />
+            <circle className="ball-ring-secondary-progress" cx="22" cy="22" r="18" pathLength="100" />
+          </svg>
+          <span className="ball-secondary-label">{text.windowSevenDaysShort}</span>
+          <span className="ball-secondary-value">{secondaryPercentText}</span>
+        </span>
+        {state === "loading" ? <span className="ball-loading">{text.loading}</span> : null}
       </button>
     </main>
   );
@@ -618,24 +785,40 @@ function MainPanelView() {
   const primaryTone = getTone(primaryRemaining);
 
   return (
-    <main className="app-shell" data-tauri-drag-region data-theme={resolvedTheme}>
+    <main className="app-shell" data-theme={resolvedTheme}>
       <section className="panel main-panel" aria-label={text.appAria}>
         <header className="panel-header">
-          <div>
+          <div data-tauri-drag-region>
             <p className="eyebrow">{text.appEyebrow}</p>
             <h1>{text.appTitle}</h1>
           </div>
           <div className="header-actions">
-            <button className="icon-button" type="button" aria-label={text.refresh} onClick={loadUsage}>
+            <button
+              className="icon-button"
+              type="button"
+              aria-label={text.refresh}
+              title={text.refresh}
+              onClick={loadUsage}
+            >
               <RefreshCcw size={18} />
             </button>
             <button
               className="icon-button"
               type="button"
               aria-label={text.settings}
+              title={text.settings}
               onClick={() => void invoke("show_settings_window")}
             >
               <Settings size={18} />
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              aria-label={text.hideMainPanel}
+              title={text.hideMainPanel}
+              onClick={() => void invoke("hide_main_panel")}
+            >
+              <X size={16} />
             </button>
           </div>
         </header>
@@ -723,20 +906,14 @@ function MainPanelView() {
           </span>
           <div className="footer-actions">
             <button
-              className="icon-button"
-              type="button"
-              aria-label={text.hideMainPanel}
-              onClick={() => void invoke("hide_main_panel")}
-            >
-              <X size={16} />
-            </button>
-            <button
-              className="icon-button"
+              className="exit-button"
               type="button"
               aria-label={text.exit}
+              title={text.exit}
               onClick={() => void invoke("exit_app")}
             >
               <Power size={16} />
+              <span>{text.exit}</span>
             </button>
           </div>
         </footer>
@@ -746,13 +923,13 @@ function MainPanelView() {
 }
 
 function SettingsView() {
-  const { settings, updateSettings, resolvedTheme, text } = useAppSettings();
+  const { settings, updateSettings, setLaunchAtLogin, resolvedTheme, text } = useAppSettings();
 
   return (
     <main className="settings-shell" data-theme={resolvedTheme}>
       <section className="settings-panel">
-        <header className="settings-header" data-tauri-drag-region>
-          <div>
+        <header className="settings-header">
+          <div data-tauri-drag-region>
             <p className="eyebrow">{text.appEyebrow}</p>
             <h1>{text.settingsTitle}</h1>
           </div>
@@ -760,13 +937,19 @@ function SettingsView() {
             className="icon-button"
             type="button"
             aria-label={text.close}
+            title={text.close}
             onClick={() => void invoke("hide_settings_window")}
           >
             <X size={18} />
           </button>
         </header>
 
-        <SettingsFields settings={settings} text={text} updateSettings={updateSettings} />
+        <SettingsFields
+          settings={settings}
+          text={text}
+          updateSettings={updateSettings}
+          setLaunchAtLogin={setLaunchAtLogin}
+        />
       </section>
     </main>
   );

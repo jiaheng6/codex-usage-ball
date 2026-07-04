@@ -4,7 +4,11 @@
   "description": "主窗口、悬浮球和设置窗口能力配置",
   "windows": ["ball", "main", "settings"],
   "permissions": [
+    "autostart:allow-disable",
+    "autostart:allow-enable",
+    "autostart:allow-is-enabled",
     "core:default",
+    "core:window:allow-set-position",
     "opener:default"
   ]
 }
