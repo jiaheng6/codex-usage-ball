@@ -113,14 +113,30 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "${{ github.event.inputs.tag || github.ref_name }}"
-          if ($env:RUNNER_OS -eq "Windows") {
-            gh release view $tag *> $null
+          $assetsFile = "release-assets/files.txt"
+          if (-not (Test-Path $assetsFile)) {
+            throw "未找到发布清单文件: $assetsFile"
+          }
+          
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --target $env:GITHUB_SHA --title "Codex Usage Ball $tag" --notes "自动构建发布的安装包" *> $null
             if ($LASTEXITCODE -ne 0) {
-              gh release create $tag --target $env:GITHUB_SHA --title "Codex Usage Ball $tag" --notes "自动构建发布的安装包"
+              gh release view $tag *> $null
+              if ($LASTEXITCODE -ne 0) {
+                throw "无法创建或访问 release: $tag"
+              }
             }
           }
-          Get-Content "release-assets/files.txt" -Raw | ForEach-Object {
-            $_.Split("`n") | Where-Object { $_ -and $_.Trim().Length -gt 0 } | ForEach-Object {
-              gh release upload $tag $_ --clobber
+
+          Get-Content $assetsFile -Raw | ForEach-Object {
+            $_.Split("`n") | ForEach-Object {
+              $asset = $_.Trim()
+              if ($asset.Length -gt 0) {
+                gh release upload $tag $asset --clobber
+                if ($LASTEXITCODE -ne 0) {
+                  throw "上传失败: $asset"
+                }
+              }
             }
           }
