@@ -29,15 +29,22 @@ import {
   enable as enableAutostart,
   isEnabled as isAutostartEnabled,
 } from "@tauri-apps/plugin-autostart";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import "./App.css";
 import {
   defaultSettings,
   normalizeAppSettings,
+  normalizeLowNoticeThreshold,
   type AppSettings,
   type Language,
   type ResolvedTheme,
   type ThemeMode,
 } from "./settings";
+import { skinOptions } from "./skins";
 
 type RateLimitWindow = {
   usedPercent: number;
@@ -68,6 +75,7 @@ type RateLimitsResponse = {
 
 type LoadState = "idle" | "loading" | "ready" | "error";
 type WindowKind = "ball" | "main" | "settings";
+type LowNoticeWindowKey = "fiveHour" | "sevenDay";
 
 type Copy = {
   appAria: string;
@@ -76,6 +84,7 @@ type Copy = {
   ballLabel: string;
   openMainPanel: string;
   hideMainPanel: string;
+  hideFloatingBall: string;
   refresh: string;
   readFailed: string;
   shortFallback: string;
@@ -101,13 +110,17 @@ type Copy = {
   chinese: string;
   english: string;
   theme: string;
+  themeSkin: string;
   followSystem: string;
   light: string;
   dark: string;
   refreshFrequency: string;
   seconds: (value: number) => string;
   lowNotice: string;
-  noticeAt15: string;
+  noticeThreshold: (value: number) => string;
+  noticeThresholdAria: string;
+  lowNoticeTitle: string;
+  lowNoticeBody: (windowName: string, remaining: number, threshold: number) => string;
   startup: string;
   enableStartup: string;
   disableStartup: string;
@@ -123,7 +136,11 @@ type Copy = {
 
 const STORAGE_KEY = "codex-usage-ball-settings";
 const SETTINGS_CHANGED_EVENT = "codex-usage-ball-settings-changed";
+const LOW_NOTICE_STATE_KEY = "codex-usage-ball-low-notice-state";
 const DRAG_START_THRESHOLD_PX = 5;
+const BALL_CLICK_REFRESH_DELAY_MS = 220;
+const BALL_CONTEXT_MENU_WIDTH = 104;
+const BALL_CONTEXT_MENU_HEIGHT = 78;
 
 const copy: Record<Language, Copy> = {
   "zh-CN": {
@@ -133,6 +150,7 @@ const copy: Record<Language, Copy> = {
     ballLabel: "剩余",
     openMainPanel: "显示主面板",
     hideMainPanel: "隐藏主面板",
+    hideFloatingBall: "隐藏悬浮球",
     refresh: "刷新用量",
     readFailed: "读取 Codex 用量失败",
     shortFallback: "短期窗口",
@@ -158,13 +176,18 @@ const copy: Record<Language, Copy> = {
     chinese: "中文",
     english: "English",
     theme: "主题",
+    themeSkin: "主题皮肤",
     followSystem: "跟随系统",
     light: "亮色",
     dark: "暗色",
     refreshFrequency: "刷新频率",
     seconds: (value) => `${value} 秒`,
     lowNotice: "低额度通知",
-    noticeAt15: "低于 15% 提醒",
+    noticeThreshold: (value) => `低于 ${value}% 提醒`,
+    noticeThresholdAria: "低额度提醒阈值",
+    lowNoticeTitle: "Codex 低额度提醒",
+    lowNoticeBody: (windowName, remaining, threshold) =>
+      `${windowName}剩余额度 ${remaining}%，已低于 ${threshold}%`,
     startup: "开机自启",
     enableStartup: "开启",
     disableStartup: "关闭",
@@ -184,6 +207,7 @@ const copy: Record<Language, Copy> = {
     ballLabel: "Left",
     openMainPanel: "Show main panel",
     hideMainPanel: "Hide main panel",
+    hideFloatingBall: "Hide ball",
     refresh: "Refresh usage",
     readFailed: "Failed to read Codex usage",
     shortFallback: "Short window",
@@ -209,13 +233,18 @@ const copy: Record<Language, Copy> = {
     chinese: "中文",
     english: "English",
     theme: "Theme",
+    themeSkin: "Skin",
     followSystem: "System",
     light: "Light",
     dark: "Dark",
     refreshFrequency: "Refresh rate",
     seconds: (value) => `${value}s`,
     lowNotice: "Low-limit alert",
-    noticeAt15: "Alert below 15%",
+    noticeThreshold: (value) => `Alert below ${value}%`,
+    noticeThresholdAria: "Low-limit alert threshold",
+    lowNoticeTitle: "Codex low-limit alert",
+    lowNoticeBody: (windowName, remaining, threshold) =>
+      `${windowName} has ${remaining}% remaining, below ${threshold}%`,
     startup: "Launch at login",
     enableStartup: "On",
     disableStartup: "Off",
@@ -308,7 +337,7 @@ function readSettings(): AppSettings {
 }
 
 function persistSettings(settings: AppSettings) {
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(normalizeAppSettings(settings)));
   window.dispatchEvent(new Event(SETTINGS_CHANGED_EVENT));
 }
 
@@ -319,6 +348,130 @@ function clampPercent(value: number) {
 function remainingPercent(windowData: RateLimitWindow | null) {
   if (!windowData) return null;
   return 100 - clampPercent(windowData.usedPercent);
+}
+
+function readLowNoticeState(): Record<string, true> {
+  try {
+    const raw = window.localStorage.getItem(LOW_NOTICE_STATE_KEY);
+    if (!raw) return {};
+
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+
+    return Object.fromEntries(
+      Object.entries(parsed).filter(([, value]) => value === true),
+    ) as Record<string, true>;
+  } catch {
+    return {};
+  }
+}
+
+function writeLowNoticeState(state: Record<string, true>) {
+  if (Object.keys(state).length === 0) {
+    window.localStorage.removeItem(LOW_NOTICE_STATE_KEY);
+    return;
+  }
+
+  window.localStorage.setItem(LOW_NOTICE_STATE_KEY, JSON.stringify(state));
+}
+
+function lowNoticeStateKey(windowKey: LowNoticeWindowKey, threshold: number) {
+  return `${windowKey}:${threshold}`;
+}
+
+function clearLowNoticeWindowState(state: Record<string, true>, windowKey: LowNoticeWindowKey) {
+  const prefix = `${windowKey}:`;
+  let changed = false;
+  const next = { ...state };
+
+  for (const key of Object.keys(next)) {
+    if (key.startsWith(prefix)) {
+      delete next[key];
+      changed = true;
+    }
+  }
+
+  return { changed, next };
+}
+
+async function sendLowLimitNotification(
+  windowName: string,
+  remaining: number,
+  threshold: number,
+  text: Copy,
+) {
+  try {
+    let granted = await isPermissionGranted();
+    if (!granted) {
+      granted = (await requestPermission()) === "granted";
+    }
+
+    if (!granted) return;
+
+    sendNotification({
+      title: text.lowNoticeTitle,
+      body: text.lowNoticeBody(windowName, remaining, threshold),
+    });
+  } catch (err) {
+    console.error("发送低额度通知失败", err);
+  }
+}
+
+function maybeNotifyLowLimit({
+  remaining,
+  text,
+  threshold,
+  windowKey,
+  windowName,
+}: {
+  remaining: number | null;
+  text: Copy;
+  threshold: number;
+  windowKey: LowNoticeWindowKey;
+  windowName: string;
+}) {
+  if (remaining === null) return;
+
+  const state = readLowNoticeState();
+  if (remaining >= threshold) {
+    const { changed, next } = clearLowNoticeWindowState(state, windowKey);
+    if (changed) writeLowNoticeState(next);
+    return;
+  }
+
+  if (!isTauriRuntime()) return;
+
+  const key = lowNoticeStateKey(windowKey, threshold);
+  if (state[key]) return;
+
+  writeLowNoticeState({ ...state, [key]: true });
+  void sendLowLimitNotification(windowName, remaining, threshold, text);
+}
+
+function useLowLimitNotifications(
+  activeLimit: RateLimitSnapshot | null,
+  settings: AppSettings,
+  text: Copy,
+) {
+  useEffect(() => {
+    if (!activeLimit) return;
+
+    const threshold = settings.lowNoticeThreshold;
+    maybeNotifyLowLimit({
+      remaining: remainingPercent(activeLimit.primary),
+      text,
+      threshold,
+      windowKey: "fiveHour",
+      windowName: text.windowFiveHours,
+    });
+    maybeNotifyLowLimit({
+      remaining: remainingPercent(activeLimit.secondary),
+      text,
+      threshold,
+      windowKey: "sevenDay",
+      windowName: text.windowSevenDays,
+    });
+  }, [activeLimit, settings.lowNoticeThreshold, text]);
 }
 
 function formatResetTime(timestamp: number | null, language: Language, text: Copy) {
@@ -374,7 +527,7 @@ function useAppSettings() {
 
   const updateSettings = useCallback((patch: Partial<AppSettings>) => {
     setSettings((current) => {
-      const next = { ...current, ...patch };
+      const next = normalizeAppSettings({ ...current, ...patch });
       persistSettings(next);
       return next;
     });
@@ -475,6 +628,19 @@ function useUsageData(refreshIntervalSec: 30 | 60) {
   return { usage, state, error, lastUpdatedAt, loadUsage };
 }
 
+function startWindowDrag(event: MouseEvent<HTMLElement>) {
+  if (event.button !== 0) return;
+
+  if (
+    event.target instanceof Element &&
+    event.target.closest("button, a, input, select, textarea, [data-no-window-drag]")
+  ) {
+    return;
+  }
+
+  void getCurrentWindow().startDragging();
+}
+
 function WindowMetric({
   fallbackName,
   language,
@@ -521,6 +687,49 @@ function ChoiceButton<T extends string | number | boolean>({
       onClick={() => onClick(value)}
     >
       {children}
+    </button>
+  );
+}
+
+function SkinPreview({ active }: { active: boolean }) {
+  return (
+    <span className={`skin-preview${active ? " skin-preview-active" : ""}`} aria-hidden="true">
+      <span className="skin-preview-ball">
+        <span />
+      </span>
+      <span className="skin-preview-panel">
+        <span />
+        <span />
+      </span>
+    </span>
+  );
+}
+
+function SkinButton({
+  active,
+  description,
+  label,
+  onClick,
+  previewClassName,
+}: {
+  active: boolean;
+  description: string;
+  label: string;
+  onClick: () => void;
+  previewClassName: string;
+}) {
+  return (
+    <button
+      className={`skin-button ${previewClassName}${active ? " skin-button-active" : ""}`}
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+    >
+      <SkinPreview active={active} />
+      <span>
+        <strong>{label}</strong>
+        <small>{description}</small>
+      </span>
     </button>
   );
 }
@@ -618,7 +827,22 @@ function SettingsFields({
 
       <div className="setting-row inline-setting">
         <span>{text.lowNotice}</span>
-        <em>{text.noticeAt15}</em>
+        <div className="threshold-control">
+          <input
+            type="number"
+            min={1}
+            max={100}
+            step={1}
+            value={settings.lowNoticeThreshold}
+            aria-label={text.noticeThresholdAria}
+            onChange={(event) =>
+              updateSettings({
+                lowNoticeThreshold: normalizeLowNoticeThreshold(Number(event.currentTarget.value)),
+              })
+            }
+          />
+          <em>{text.noticeThreshold(settings.lowNoticeThreshold)}</em>
+        </div>
       </div>
 
       <div className="setting-row inline-setting">
@@ -640,13 +864,33 @@ function SettingsFields({
           </ChoiceButton>
         </div>
       </div>
+
+      <div className="setting-row">
+        <span>
+          <MonitorCog size={15} />
+          {text.themeSkin}
+        </span>
+        <div className="skin-grid">
+          {skinOptions.map((skin) => (
+            <SkinButton
+              active={settings.skin === skin.id}
+              description={skin.description[settings.language]}
+              key={skin.id}
+              label={skin.label[settings.language]}
+              onClick={() => updateSettings({ skin: skin.id })}
+              previewClassName={skin.previewClassName}
+            />
+          ))}
+        </div>
+      </div>
     </section>
   );
 }
 
 function BallView() {
   const { settings, resolvedTheme, text } = useAppSettings();
-  const { usage, state } = useUsageData(settings.refreshIntervalSec);
+  const { usage, loadUsage } = useUsageData(settings.refreshIntervalSec);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const dragStartRef = useRef<{
     x: number;
     y: number;
@@ -658,7 +902,9 @@ function BallView() {
     ready: boolean;
   } | null>(null);
   const suppressClickRef = useRef(false);
+  const clickRefreshTimerRef = useRef<number | null>(null);
   const activeLimit = usage?.rateLimits ?? null;
+  useLowLimitNotifications(activeLimit, settings, text);
   const primaryRemaining = remainingPercent(activeLimit?.primary ?? null);
   const secondaryRemaining = remainingPercent(activeLimit?.secondary ?? null);
   const primaryTone = getTone(primaryRemaining);
@@ -669,7 +915,15 @@ function BallView() {
     "--ball-primary-progress": `${primaryRemaining ?? 0}`,
     "--ball-secondary-progress": `${secondaryRemaining ?? 0}`,
   } as CSSProperties;
-  const ballTitle = `${text.openMainPanel} · ${text.windowFiveHoursShort} ${primaryPercentText} · ${text.windowSevenDaysShort} ${secondaryPercentText}`;
+  const ballTitle = `${text.refresh} · ${text.openMainPanel} · ${text.windowFiveHoursShort} ${primaryPercentText} · ${text.windowSevenDaysShort} ${secondaryPercentText}`;
+
+  const clearClickRefreshTimer = useCallback(() => {
+    if (clickRefreshTimerRef.current === null) return;
+    window.clearTimeout(clickRefreshTimerRef.current);
+    clickRefreshTimerRef.current = null;
+  }, []);
+
+  useEffect(() => clearClickRefreshTimer, [clearClickRefreshTimer]);
 
   const resetDragState = useCallback((event?: PointerEvent<HTMLButtonElement>) => {
     if (event?.currentTarget.hasPointerCapture(event.pointerId)) {
@@ -683,6 +937,7 @@ function BallView() {
 
   const handleBallPointerDown = useCallback((event: PointerEvent<HTMLButtonElement>) => {
     if (event.button !== 0) return;
+    setContextMenu(null);
     event.currentTarget.setPointerCapture(event.pointerId);
     suppressClickRef.current = false;
     dragStartRef.current = {
@@ -731,18 +986,57 @@ function BallView() {
       event.preventDefault();
       return;
     }
+    setContextMenu(null);
+    clearClickRefreshTimer();
+    clickRefreshTimerRef.current = window.setTimeout(() => {
+      clickRefreshTimerRef.current = null;
+      void loadUsage();
+    }, BALL_CLICK_REFRESH_DELAY_MS);
+  }, [clearClickRefreshTimer, loadUsage]);
+
+  const handleBallDoubleClick = useCallback((event: MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    clearClickRefreshTimer();
+    setContextMenu(null);
     void invoke("show_main_panel");
+  }, [clearClickRefreshTimer]);
+
+  const handleBallContextMenu = useCallback((event: MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    clearClickRefreshTimer();
+    suppressClickRef.current = true;
+    const maxX = Math.max(4, window.innerWidth - BALL_CONTEXT_MENU_WIDTH - 4);
+    const maxY = Math.max(4, window.innerHeight - BALL_CONTEXT_MENU_HEIGHT - 4);
+    setContextMenu({
+      x: Math.min(Math.max(4, event.clientX), maxX),
+      y: Math.min(Math.max(4, event.clientY), maxY),
+    });
+    window.setTimeout(() => {
+      suppressClickRef.current = false;
+    }, 0);
+  }, [clearClickRefreshTimer]);
+
+  const hideFloatingBall = useCallback(() => {
+    setContextMenu(null);
+    void invoke("hide_ball_window");
+  }, []);
+
+  const exitFromBallMenu = useCallback(() => {
+    setContextMenu(null);
+    void invoke("exit_app");
   }, []);
 
   return (
-    <main className="ball-shell" data-theme={resolvedTheme}>
+    <main className="ball-shell" data-skin={settings.skin} data-theme={resolvedTheme}>
       <button
         className={`usage-ball compact-ball usage-ball-${primaryTone} usage-ball-secondary-${secondaryTone}`}
         type="button"
-        aria-label={text.openMainPanel}
+        aria-label={text.refresh}
         title={ballTitle}
         style={ballStyle}
         onClick={handleBallClick}
+        onContextMenu={handleBallContextMenu}
+        onDoubleClick={handleBallDoubleClick}
         onPointerCancel={resetDragState}
         onPointerDown={handleBallPointerDown}
         onPointerMove={handleBallPointerMove}
@@ -764,8 +1058,21 @@ function BallView() {
           <span className="ball-secondary-label">{text.windowSevenDaysShort}</span>
           <span className="ball-secondary-value">{secondaryPercentText}</span>
         </span>
-        {state === "loading" ? <span className="ball-loading">{text.loading}</span> : null}
       </button>
+      {contextMenu ? (
+        <div
+          className="ball-context-menu"
+          role="menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+        >
+          <button type="button" role="menuitem" onClick={hideFloatingBall}>
+            {text.hideFloatingBall}
+          </button>
+          <button type="button" role="menuitem" onClick={exitFromBallMenu}>
+            {text.exit}
+          </button>
+        </div>
+      ) : null}
     </main>
   );
 }
@@ -776,6 +1083,7 @@ function MainPanelView() {
   const [showLimits, setShowLimits] = useState(true);
 
   const activeLimit = usage?.rateLimits ?? null;
+  useLowLimitNotifications(activeLimit, settings, text);
   const limits = useMemo(() => {
     if (!usage?.rateLimitsByLimitId) return [];
     return Object.values(usage.rateLimitsByLimitId);
@@ -785,9 +1093,9 @@ function MainPanelView() {
   const primaryTone = getTone(primaryRemaining);
 
   return (
-    <main className="app-shell" data-theme={resolvedTheme}>
+    <main className="app-shell" data-skin={settings.skin} data-theme={resolvedTheme}>
       <section className="panel main-panel" aria-label={text.appAria}>
-        <header className="panel-header">
+        <header className="panel-header draggable-header" onMouseDown={startWindowDrag}>
           <div data-tauri-drag-region>
             <p className="eyebrow">{text.appEyebrow}</p>
             <h1>{text.appTitle}</h1>
@@ -926,9 +1234,9 @@ function SettingsView() {
   const { settings, updateSettings, setLaunchAtLogin, resolvedTheme, text } = useAppSettings();
 
   return (
-    <main className="settings-shell" data-theme={resolvedTheme}>
+    <main className="settings-shell" data-skin={settings.skin} data-theme={resolvedTheme}>
       <section className="settings-panel">
-        <header className="settings-header">
+        <header className="settings-header draggable-header" onMouseDown={startWindowDrag}>
           <div data-tauri-drag-region>
             <p className="eyebrow">{text.appEyebrow}</p>
             <h1>{text.settingsTitle}</h1>

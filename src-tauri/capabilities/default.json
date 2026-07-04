@@ -9,6 +9,7 @@
     "autostart:allow-is-enabled",
     "core:default",
     "core:window:allow-set-position",
+    "notification:default",
     "opener:default"
   ]
 }

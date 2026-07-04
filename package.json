@@ -1,7 +1,7 @@
 {
   "name": "codex-usage-ball",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Codex 用量悬浮球：桌面查看 Codex 5 小时和 7 天额度窗口",
   "keywords": [
     "codex",
@@ -29,6 +29,7 @@
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-autostart": "^2.5.1",
+    "@tauri-apps/plugin-notification": "^2.3.3",
     "@tauri-apps/plugin-opener": "^2",
     "lucide-react": "^1.23.0",
     "react": "^19.1.0",

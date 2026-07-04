@@ -745,6 +745,11 @@ fn hide_main_panel(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn hide_ball_window(app: AppHandle) -> Result<(), String> {
+    hide_window(&app, BALL_WINDOW_LABEL)
+}
+
+#[tauri::command]
 fn show_settings_window(app: AppHandle) -> Result<(), String> {
     show_window(&app, SETTINGS_WINDOW_LABEL)
 }
@@ -766,6 +771,7 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let position_store = load_window_position_store(app.handle());
@@ -789,6 +795,7 @@ pub fn run() {
             read_rate_limits,
             show_main_panel,
             hide_main_panel,
+            hide_ball_window,
             show_settings_window,
             hide_settings_window,
             exit_app

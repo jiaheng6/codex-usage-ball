@@ -1,12 +1,21 @@
 export type Language = "zh-CN" | "en-US";
 export type ThemeMode = "system" | "light" | "dark";
 export type ResolvedTheme = "light" | "dark";
+export type SkinName =
+  | "glass"
+  | "dashboard"
+  | "minimal"
+  | "terminal"
+  | "sea"
+  | "contrast";
 
 export type AppSettings = {
   language: Language;
   themeMode: ThemeMode;
   refreshIntervalSec: 30 | 60;
   launchAtLogin: boolean;
+  lowNoticeThreshold: number;
+  skin: SkinName;
 };
 
 export const defaultSettings: AppSettings = {
@@ -14,7 +23,30 @@ export const defaultSettings: AppSettings = {
   themeMode: "system",
   refreshIntervalSec: 60,
   launchAtLogin: false,
+  lowNoticeThreshold: 15,
+  skin: "glass",
 };
+
+export const skinNames = [
+  "glass",
+  "dashboard",
+  "minimal",
+  "terminal",
+  "sea",
+  "contrast",
+] as const satisfies readonly SkinName[];
+
+function normalizeSkin(value: unknown): SkinName {
+  return skinNames.includes(value as SkinName) ? (value as SkinName) : defaultSettings.skin;
+}
+
+export function normalizeLowNoticeThreshold(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return defaultSettings.lowNoticeThreshold;
+  }
+
+  return Math.min(100, Math.max(1, Math.round(value)));
+}
 
 export function normalizeAppSettings(value: unknown): AppSettings {
   const parsed =
@@ -28,5 +60,7 @@ export function normalizeAppSettings(value: unknown): AppSettings {
         : "system",
     refreshIntervalSec: parsed.refreshIntervalSec === 30 ? 30 : 60,
     launchAtLogin: parsed.launchAtLogin === true,
+    lowNoticeThreshold: normalizeLowNoticeThreshold(parsed.lowNoticeThreshold),
+    skin: normalizeSkin(parsed.skin),
   };
 }
