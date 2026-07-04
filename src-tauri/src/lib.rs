@@ -375,7 +375,11 @@ struct GetAccountRateLimitsResponse {
 #[derive(Debug)]
 enum CodexLauncher {
     Direct(PathBuf),
+    #[cfg(not(windows))]
+    ShScript(PathBuf),
+    #[cfg(windows)]
     CmdScript(PathBuf),
+    #[cfg(windows)]
     PowerShellScript(PathBuf),
 }
 
@@ -387,6 +391,14 @@ impl CodexLauncher {
                 command.args(["app-server", "--listen", "stdio://"]);
                 command
             }
+            #[cfg(not(windows))]
+            CodexLauncher::ShScript(path) => {
+                let mut command = Command::new("sh");
+                command.arg(path);
+                command.args(["app-server", "--listen", "stdio://"]);
+                command
+            }
+            #[cfg(windows)]
             CodexLauncher::CmdScript(path) => {
                 let mut command = Command::new("cmd.exe");
                 command
@@ -395,6 +407,7 @@ impl CodexLauncher {
                     .args(["app-server", "--listen", "stdio://"]);
                 command
             }
+            #[cfg(windows)]
             CodexLauncher::PowerShellScript(path) => {
                 let mut command = Command::new("powershell.exe");
                 command
@@ -436,7 +449,11 @@ fn launcher_for_path(path: PathBuf) -> CodexLauncher {
         .to_ascii_lowercase();
 
     match extension.as_str() {
+        #[cfg(not(windows))]
+        "sh" => CodexLauncher::ShScript(path),
+        #[cfg(windows)]
         "cmd" | "bat" => CodexLauncher::CmdScript(path),
+        #[cfg(windows)]
         "ps1" => CodexLauncher::PowerShellScript(path),
         _ => CodexLauncher::Direct(path),
     }
@@ -457,6 +474,55 @@ fn candidate_dirs() -> Vec<PathBuf> {
         dirs.extend(env::split_paths(&path));
     }
 
+    #[cfg(not(windows))]
+    {
+        push_dir(
+            &mut dirs,
+            env::var_os("HOME").map(|value| {
+                PathBuf::from(value)
+                    .join(".local")
+                    .join("bin")
+                    .into_os_string()
+            }),
+        );
+        push_dir(
+            &mut dirs,
+            env::var_os("HOME").map(|value| {
+                PathBuf::from(value)
+                    .join(".npm-global")
+                    .join("bin")
+                    .into_os_string()
+            }),
+        );
+        push_dir(
+            &mut dirs,
+            env::var_os("HOME").map(|value| {
+                PathBuf::from(value)
+                    .join(".npm")
+                    .join("bin")
+                    .into_os_string()
+            }),
+        );
+        push_dir(
+            &mut dirs,
+            env::var_os("HOME").map(|value| {
+                PathBuf::from(value)
+                    .join(".asdf")
+                    .join("shims")
+                    .into_os_string()
+            }),
+        );
+        push_dir(
+            &mut dirs,
+            env::var_os("NPM_CONFIG_PREFIX").map(|value| {
+                PathBuf::from(value)
+                    .join("bin")
+                    .into_os_string()
+            }),
+        );
+    }
+
+    #[cfg(windows)]
     push_dir(
         &mut dirs,
         env::var_os("ProgramFiles")
@@ -498,7 +564,10 @@ fn find_codex_launcher() -> Result<CodexLauncher, String> {
         }
     }
 
+    #[cfg(windows)]
     let names = ["codex.exe", "codex.cmd", "codex.bat", "codex.ps1"];
+    #[cfg(not(windows))]
+    let names = ["codex"];
     let mut tried = Vec::new();
 
     for dir in candidate_dirs() {

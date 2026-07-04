@@ -1,5 +1,4 @@
-name: 发布安装包
-
+name: 发布与构建
 on:
   push:
     tags:
@@ -15,9 +14,16 @@ permissions:
   contents: write
 
 jobs:
-  build-windows:
-    name: 构建 Windows 安装包
-    runs-on: windows-latest
+  build:
+    name: 构建并上传安装包
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+          - os: macos-latest
+          - os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: 检出代码
@@ -37,7 +43,17 @@ jobs:
       - name: 安装 Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: 安装前端依赖
+      - name: 安装 Linux 打包依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev
+
+      - name: 安装项目依赖
         run: pnpm install --frozen-lockfile
 
       - name: 运行测试
@@ -46,17 +62,50 @@ jobs:
       - name: 构建安装包
         run: pnpm tauri build
 
-      - name: 整理安装包文件名
+      - name: 整理发布产物
         shell: pwsh
+        id: package
         run: |
           $tag = "${{ github.event.inputs.tag || github.ref_name }}"
           $version = $tag.TrimStart("v")
-          $source = Get-ChildItem "src-tauri/target/release/bundle/nsis" -Filter "*setup.exe" | Select-Object -First 1
-          if (-not $source) {
-            throw "未找到 NSIS 安装包"
-          }
           New-Item -ItemType Directory -Path "release-assets" -Force | Out-Null
-          Copy-Item $source.FullName "release-assets/codex-usage-ball_${version}_x64-setup.exe" -Force
+
+          $os = $env:RUNNER_OS
+          $files = @()
+          if ($os -eq "Windows") {
+            $source = Get-ChildItem "src-tauri/target/release/bundle/nsis" -Filter "*setup.exe" | Select-Object -First 1
+            if (-not $source) {
+              throw "未找到 NSIS 安装包"
+            }
+            $target = "release-assets/codex-usage-ball_${version}_windows_x64-setup.exe"
+            Copy-Item $source.FullName $target -Force
+            $files += $target
+          } elseif ($os -eq "macOS") {
+            $source = Get-ChildItem "src-tauri/target/release/bundle/dmg" -Filter "*.dmg" | Select-Object -First 1
+            if (-not $source) {
+              throw "未找到 macOS 安装包"
+            }
+            $target = "release-assets/codex-usage-ball_${version}_macos_universal.dmg"
+            Copy-Item $source.FullName $target -Force
+            $files += $target
+          } else {
+            $source = Get-ChildItem "src-tauri/target/release/bundle/deb" -Filter "*.deb" | Select-Object -First 1
+            if (-not $source) {
+              throw "未找到 Linux DEB 安装包"
+            }
+            $target = "release-assets/codex-usage-ball_${version}_linux_amd64.deb"
+            Copy-Item $source.FullName $target -Force
+            $files += $target
+
+            $appimage = Get-ChildItem "src-tauri/target/release/bundle/appimage" -Filter "*.AppImage" | Select-Object -First 1
+            if ($appimage) {
+              $appTarget = "release-assets/codex-usage-ball_${version}_linux_amd64.AppImage"
+              Copy-Item $appimage.FullName $appTarget -Force
+              $files += $appTarget
+            }
+          }
+
+          $files -join "`n" | Out-File -FilePath "release-assets/files.txt" -Encoding UTF8 -NoNewline
 
       - name: 上传 Release
         shell: pwsh
@@ -64,8 +113,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "${{ github.event.inputs.tag || github.ref_name }}"
-          gh release view $tag *> $null
-          if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --target $env:GITHUB_SHA --title "Codex 用量悬浮球 $tag" --notes "自动构建的 Windows 安装包。"
+          if ($env:RUNNER_OS -eq "Windows") {
+            gh release view $tag *> $null
+            if ($LASTEXITCODE -ne 0) {
+              gh release create $tag --target $env:GITHUB_SHA --title "Codex Usage Ball $tag" --notes "自动构建发布的安装包"
+            }
           }
-          gh release upload $tag "release-assets/codex-usage-ball_$($tag.TrimStart('v'))_x64-setup.exe" --clobber
+          Get-Content "release-assets/files.txt" -Raw | ForEach-Object {
+            $_.Split("`n") | Where-Object { $_ -and $_.Trim().Length -gt 0 } | ForEach-Object {
+              gh release upload $tag $_ --clobber
+            }
+          }
