@@ -43,13 +43,29 @@ jobs:
       - name: 运行测试
         run: pnpm test
 
-      - name: 构建并上传 Release
-        uses: tauri-apps/tauri-action@v0
+      - name: 构建安装包
+        run: pnpm tauri build
+
+      - name: 整理安装包文件名
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag || github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          $source = Get-ChildItem "src-tauri/target/release/bundle/nsis" -Filter "*setup.exe" | Select-Object -First 1
+          if (-not $source) {
+            throw "未找到 NSIS 安装包"
+          }
+          New-Item -ItemType Directory -Path "release-assets" -Force | Out-Null
+          Copy-Item $source.FullName "release-assets/codex-usage-ball_${version}_x64-setup.exe" -Force
+
+      - name: 上传 Release
+        shell: pwsh
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: ${{ github.event.inputs.tag || github.ref_name }}
-          releaseName: Codex 用量悬浮球 ${{ github.event.inputs.tag || github.ref_name }}
-          releaseBody: 自动构建的 Windows 安装包。
-          releaseDraft: false
-          prerelease: false
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ github.event.inputs.tag || github.ref_name }}"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --target $env:GITHUB_SHA --title "Codex 用量悬浮球 $tag" --notes "自动构建的 Windows 安装包。"
+          }
+          gh release upload $tag "release-assets/codex-usage-ball_$($tag.TrimStart('v'))_x64-setup.exe" --clobber
