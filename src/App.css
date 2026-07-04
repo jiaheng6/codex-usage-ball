@@ -409,10 +409,16 @@ footer {
 .draggable-header {
   cursor: move;
   user-select: none;
+  -webkit-app-region: drag;
 }
 
 .draggable-header button {
   cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.draggable-header [data-no-window-drag] {
+  -webkit-app-region: no-drag;
 }
 
 .panel-header h1,
@@ -682,6 +688,38 @@ h1 {
   border-top: 1px solid var(--border-soft);
   color: var(--muted);
   font-size: 13px;
+  align-items: center;
+}
+
+.rate-limit-switch {
+  margin-left: auto;
+  height: 28px;
+  min-width: 66px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(0, 0, 0, 0.04)), var(--button-bg);
+  color: inherit;
+  box-shadow: var(--button-shadow);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 720;
+}
+
+.rate-limit-switch:hover {
+  background: var(--button-hover);
+}
+
+.rate-limit-switch-selected {
+  border-color: transparent;
+  background: var(--button-bg);
+  color: var(--muted);
+  cursor: default;
+}
+
+.rate-limit-switch:disabled {
+  opacity: 0.7;
+  cursor: default;
 }
 
 .limit-row span {

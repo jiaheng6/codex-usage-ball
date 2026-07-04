@@ -67,7 +67,7 @@ describe("面板拖拽", () => {
   test("主面板和设置面板标题栏启动窗口拖拽", () => {
     expect(appSource).toContain("function startWindowDrag");
     expect(appSource).toContain("startDragging()");
-    expect((appSource.match(/onMouseDown=\{startWindowDrag\}/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    expect((appSource.match(/onPointerDown=\{startWindowDrag\}/g) ?? []).length).toBeGreaterThanOrEqual(2);
     expect(appStyles).toContain(".draggable-header");
   });
 });

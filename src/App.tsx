@@ -76,6 +76,10 @@ type RateLimitsResponse = {
 type LoadState = "idle" | "loading" | "ready" | "error";
 type WindowKind = "ball" | "main" | "settings";
 type LowNoticeWindowKey = "fiveHour" | "sevenDay";
+type RateLimitBucketOption = {
+  id: string;
+  name: string;
+};
 
 type Copy = {
   appAria: string;
@@ -111,6 +115,10 @@ type Copy = {
   english: string;
   theme: string;
   themeSkin: string;
+  activeRateLimitBucket: string;
+  defaultRateLimitBucket: string;
+  rateLimitBucketAria: string;
+  showRateLimit: (selected: boolean) => string;
   followSystem: string;
   light: string;
   dark: string;
@@ -141,6 +149,7 @@ const DRAG_START_THRESHOLD_PX = 5;
 const BALL_CLICK_REFRESH_DELAY_MS = 220;
 const BALL_CONTEXT_MENU_WIDTH = 104;
 const BALL_CONTEXT_MENU_HEIGHT = 78;
+const DEFAULT_RATE_LIMIT_ID = "__default__";
 
 const copy: Record<Language, Copy> = {
   "zh-CN": {
@@ -168,7 +177,7 @@ const copy: Record<Language, Copy> = {
     loading: "正在刷新",
     waiting: "等待数据",
     updated: (time) => `${time} 更新`,
-    settings: "设置",
+    settings: "偏好设置",
     exit: "退出程序",
     settingsTitle: "偏好设置",
     close: "关闭",
@@ -177,6 +186,10 @@ const copy: Record<Language, Copy> = {
     english: "English",
     theme: "主题",
     themeSkin: "主题皮肤",
+    activeRateLimitBucket: "模型用量桶",
+    defaultRateLimitBucket: "默认桶(默认)",
+    rateLimitBucketAria: "当前显示模型用量桶",
+    showRateLimit: (selected) => (selected ? "正在展示" : "切换展示"),
     followSystem: "跟随系统",
     light: "亮色",
     dark: "暗色",
@@ -225,7 +238,7 @@ const copy: Record<Language, Copy> = {
     loading: "Refreshing",
     waiting: "Waiting for data",
     updated: (time) => `Updated ${time}`,
-    settings: "Settings",
+    settings: "Preferences",
     exit: "Exit app",
     settingsTitle: "Preferences",
     close: "Close",
@@ -234,6 +247,10 @@ const copy: Record<Language, Copy> = {
     english: "English",
     theme: "Theme",
     themeSkin: "Skin",
+    activeRateLimitBucket: "Rate limit bucket",
+    defaultRateLimitBucket: "Default bucket",
+    rateLimitBucketAria: "Rate limit bucket",
+    showRateLimit: (selected) => (selected ? "Showing" : "Switch"),
     followSystem: "System",
     light: "Light",
     dark: "Dark",
@@ -348,6 +365,48 @@ function clampPercent(value: number) {
 function remainingPercent(windowData: RateLimitWindow | null) {
   if (!windowData) return null;
   return 100 - clampPercent(windowData.usedPercent);
+}
+
+function limitName(limit: RateLimitSnapshot | null, text: Copy) {
+  return limit?.limitName || limit?.limitId || text.defaultRateLimitBucket;
+}
+
+function resolveActiveLimit(
+  usage: RateLimitsResponse | null,
+  activeRateLimitId: string,
+) {
+  if (!usage) return null;
+  if (
+    activeRateLimitId &&
+    activeRateLimitId !== DEFAULT_RATE_LIMIT_ID &&
+    usage.rateLimitsByLimitId?.[activeRateLimitId]
+  ) {
+    return usage.rateLimitsByLimitId[activeRateLimitId];
+  }
+
+  return usage.rateLimits;
+}
+
+function resolveRateLimitBucketOptions(
+  usage: RateLimitsResponse | null,
+  text: Copy,
+) {
+  const options: RateLimitBucketOption[] = [
+    { id: DEFAULT_RATE_LIMIT_ID, name: text.defaultRateLimitBucket },
+  ];
+
+  if (!usage?.rateLimitsByLimitId) return options;
+
+  for (const [limitId, limit] of Object.entries(usage.rateLimitsByLimitId)) {
+    if (limitId === DEFAULT_RATE_LIMIT_ID) continue;
+    if (!limit) continue;
+    options.push({
+      id: limitId,
+      name: limitName(limit, text),
+    });
+  }
+
+  return options;
 }
 
 function readLowNoticeState(): Record<string, true> {
@@ -628,7 +687,7 @@ function useUsageData(refreshIntervalSec: 30 | 60) {
   return { usage, state, error, lastUpdatedAt, loadUsage };
 }
 
-function startWindowDrag(event: MouseEvent<HTMLElement>) {
+function startWindowDrag(event: PointerEvent<HTMLElement>) {
   if (event.button !== 0) return;
 
   if (
@@ -903,7 +962,7 @@ function BallView() {
   } | null>(null);
   const suppressClickRef = useRef(false);
   const clickRefreshTimerRef = useRef<number | null>(null);
-  const activeLimit = usage?.rateLimits ?? null;
+  const activeLimit = resolveActiveLimit(usage, settings.activeRateLimitId);
   useLowLimitNotifications(activeLimit, settings, text);
   const primaryRemaining = remainingPercent(activeLimit?.primary ?? null);
   const secondaryRemaining = remainingPercent(activeLimit?.secondary ?? null);
@@ -915,7 +974,7 @@ function BallView() {
     "--ball-primary-progress": `${primaryRemaining ?? 0}`,
     "--ball-secondary-progress": `${secondaryRemaining ?? 0}`,
   } as CSSProperties;
-  const ballTitle = `${text.refresh} · ${text.openMainPanel} · ${text.windowFiveHoursShort} ${primaryPercentText} · ${text.windowSevenDaysShort} ${secondaryPercentText}`;
+  const ballTitle = `${limitName(activeLimit, text)}：${text.windowFiveHoursShort} ${primaryPercentText} ${text.windowSevenDaysShort} ${secondaryPercentText}`;
 
   const clearClickRefreshTimer = useCallback(() => {
     if (clickRefreshTimerRef.current === null) return;
@@ -1078,24 +1137,41 @@ function BallView() {
 }
 
 function MainPanelView() {
-  const { settings, resolvedTheme, text } = useAppSettings();
+  const { settings, resolvedTheme, text, updateSettings } = useAppSettings();
   const { usage, state, error, lastUpdatedAt, loadUsage } = useUsageData(settings.refreshIntervalSec);
   const [showLimits, setShowLimits] = useState(true);
 
-  const activeLimit = usage?.rateLimits ?? null;
+  const activeLimit = resolveActiveLimit(usage, settings.activeRateLimitId);
   useLowLimitNotifications(activeLimit, settings, text);
-  const limits = useMemo(() => {
-    if (!usage?.rateLimitsByLimitId) return [];
-    return Object.values(usage.rateLimitsByLimitId);
-  }, [usage]);
+  const rateLimitBuckets = useMemo(() => {
+    return resolveRateLimitBucketOptions(usage, text)
+      .map((bucket) => ({
+        id: bucket.id,
+        name: bucket.name,
+        limit:
+          bucket.id === DEFAULT_RATE_LIMIT_ID
+            ? usage?.rateLimits ?? null
+            : usage?.rateLimitsByLimitId?.[bucket.id] ?? null,
+      }))
+      .filter((bucket) => Boolean(bucket.limit));
+  }, [usage, text]);
+  const hasMultipleBucketOptions = (usage?.rateLimitsByLimitId
+    ? Object.keys(usage.rateLimitsByLimitId).length
+    : 0) > 1;
+  const canSwitchRateLimit = rateLimitBuckets.length > 1 && hasMultipleBucketOptions;
 
   const primaryRemaining = remainingPercent(activeLimit?.primary ?? null);
   const primaryTone = getTone(primaryRemaining);
+  const activeBucketName = limitName(activeLimit, text);
 
   return (
     <main className="app-shell" data-skin={settings.skin} data-theme={resolvedTheme}>
       <section className="panel main-panel" aria-label={text.appAria}>
-        <header className="panel-header draggable-header" onMouseDown={startWindowDrag}>
+        <header
+          className="panel-header draggable-header"
+          onPointerDown={startWindowDrag}
+          onDoubleClick={(event) => event.stopPropagation()}
+        >
           <div data-tauri-drag-region>
             <p className="eyebrow">{text.appEyebrow}</p>
             <h1>{text.appTitle}</h1>
@@ -1132,7 +1208,7 @@ function MainPanelView() {
         </header>
 
         <section className={`headline headline-${primaryTone}`}>
-          <span>{text.ballLabel}</span>
+          <span>{activeBucketName}</span>
           <strong>{primaryRemaining === null ? "--" : `${primaryRemaining}%`}</strong>
         </section>
 
@@ -1191,11 +1267,26 @@ function MainPanelView() {
           </button>
           {showLimits ? (
             <div className="limit-list">
-              {limits.map((limit) => {
-                const remain = remainingPercent(limit.primary);
+              {rateLimitBuckets.map((bucket) => {
+                const remain = remainingPercent(bucket.limit?.primary ?? null);
+                const selected = settings.activeRateLimitId === bucket.id;
                 return (
-                  <div className="limit-row" key={limit.limitId ?? limit.limitName ?? "default"}>
-                    <span>{limit.limitName ?? limit.limitId ?? "Codex"}</span>
+                  <div className="limit-row" key={bucket.id}>
+                    <span>{bucket.name}</span>
+                    {canSwitchRateLimit ? (
+                      <button
+                        className={`rate-limit-switch${selected ? " rate-limit-switch-selected" : ""}`}
+                        type="button"
+                        disabled={selected}
+                        onClick={() => {
+                          if (!selected) {
+                            updateSettings({ activeRateLimitId: bucket.id });
+                          }
+                        }}
+                      >
+                        {text.showRateLimit(selected)}
+                      </button>
+                    ) : null}
                     <strong>{remain === null ? "--" : `${remain}%`}</strong>
                   </div>
                 );
@@ -1236,7 +1327,11 @@ function SettingsView() {
   return (
     <main className="settings-shell" data-skin={settings.skin} data-theme={resolvedTheme}>
       <section className="settings-panel">
-        <header className="settings-header draggable-header" onMouseDown={startWindowDrag}>
+        <header
+          className="settings-header draggable-header"
+          onPointerDown={startWindowDrag}
+          onDoubleClick={(event) => event.stopPropagation()}
+        >
           <div data-tauri-drag-region>
             <p className="eyebrow">{text.appEyebrow}</p>
             <h1>{text.settingsTitle}</h1>

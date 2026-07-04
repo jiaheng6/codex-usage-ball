@@ -24,6 +24,11 @@ const MENU_EXIT: &str = "exit_app";
 const WINDOW_STATE_FILE: &str = "window-positions.json";
 const RIGHT_SNAP_DISTANCE_PX: i32 = 24;
 
+#[derive(Default)]
+struct TrayState {
+    ball_toggle_item: Option<CheckMenuItem<tauri::Wry>>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredWindowPosition {
@@ -613,6 +618,9 @@ fn show_window(app: &AppHandle, label: &str) -> Result<(), String> {
     window.show().map_err(|err| err.to_string())?;
     let _ = window.unminimize();
     let _ = window.set_focus();
+    if label == BALL_WINDOW_LABEL {
+        set_ball_menu_checked(app, true);
+    }
     Ok(())
 }
 
@@ -621,24 +629,36 @@ fn hide_window(app: &AppHandle, label: &str) -> Result<(), String> {
         .get_webview_window(label)
         .ok_or_else(|| format!("未找到窗口：{label}"))?;
 
-    window.hide().map_err(|err| err.to_string())
+    window.hide().map_err(|err| err.to_string())?;
+    if label == BALL_WINDOW_LABEL {
+        set_ball_menu_checked(app, false);
+    }
+    Ok(())
 }
 
-fn toggle_ball_window(app: &AppHandle, toggle_item: &CheckMenuItem<tauri::Wry>) {
-    let Some(window) = app.get_webview_window(BALL_WINDOW_LABEL) else {
-        let _ = toggle_item.set_checked(false);
+fn set_ball_menu_checked(app: &AppHandle, checked: bool) {
+    let app_state = app.state::<Mutex<TrayState>>();
+    let Ok(state) = app_state.lock() else {
         return;
     };
 
-    let visible = window.is_visible().unwrap_or(false);
-    if visible {
-        let _ = window.hide();
-        let _ = toggle_item.set_checked(false);
+    let Some(toggle_item) = state.ball_toggle_item.as_ref() else {
+        return;
+    };
+
+    let _ = toggle_item.set_checked(checked);
+}
+
+fn toggle_ball_window(app: &AppHandle) {
+    let Some(window) = app.get_webview_window(BALL_WINDOW_LABEL) else {
+        set_ball_menu_checked(app, false);
+        return;
+    };
+
+    if window.is_visible().unwrap_or(false) {
+        let _ = hide_window(app, BALL_WINDOW_LABEL);
     } else {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-        let _ = toggle_item.set_checked(true);
+        let _ = show_window(app, BALL_WINDOW_LABEL);
     }
 }
 
@@ -652,7 +672,10 @@ fn install_tray(app: &AppHandle) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
-    let show_settings = MenuItem::with_id(app, MENU_SHOW_SETTINGS, "设置", true, None::<&str>)?;
+    let show_settings = MenuItem::with_id(app, MENU_SHOW_SETTINGS, "偏好设置", true, None::<&str>)?;
+    if let Ok(mut tray_state) = app.state::<Mutex<TrayState>>().lock() {
+        tray_state.ball_toggle_item = Some(toggle_ball.clone());
+    }
     let separator = PredefinedMenuItem::separator(app)?;
     let exit = MenuItem::with_id(app, MENU_EXIT, "退出程序", true, None::<&str>)?;
     let menu = Menu::with_items(
@@ -660,7 +683,6 @@ fn install_tray(app: &AppHandle) -> tauri::Result<()> {
         &[&show_main, &toggle_ball, &show_settings, &separator, &exit],
     )?;
 
-    let toggle_for_menu = toggle_ball.clone();
     let mut builder = TrayIconBuilder::new()
         .menu(&menu)
         .tooltip("Codex 用量悬浮球")
@@ -669,7 +691,7 @@ fn install_tray(app: &AppHandle) -> tauri::Result<()> {
             MENU_SHOW_MAIN => {
                 let _ = show_window(app, MAIN_WINDOW_LABEL);
             }
-            MENU_TOGGLE_BALL => toggle_ball_window(app, &toggle_for_menu),
+            MENU_TOGGLE_BALL => toggle_ball_window(app),
             MENU_SHOW_SETTINGS => {
                 let _ = show_window(app, SETTINGS_WINDOW_LABEL);
             }
@@ -845,6 +867,7 @@ pub fn run() {
         .setup(|app| {
             let position_store = load_window_position_store(app.handle());
             app.manage(Mutex::new(position_store));
+            app.manage(Mutex::new(TrayState::default()));
             restore_window_positions(app.handle());
             install_tray(app.handle())?;
             Ok(())
@@ -854,7 +877,7 @@ pub fn run() {
             WindowEvent::CloseRequested { api, .. } => match window.label() {
                 BALL_WINDOW_LABEL | MAIN_WINDOW_LABEL | SETTINGS_WINDOW_LABEL => {
                     api.prevent_close();
-                    let _ = window.hide();
+                    let _ = hide_window(&window.app_handle(), window.label());
                 }
                 _ => {}
             },
@@ -976,3 +999,4 @@ mod tests {
         );
     }
 }
+

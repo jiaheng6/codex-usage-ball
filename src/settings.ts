@@ -16,6 +16,7 @@ export type AppSettings = {
   launchAtLogin: boolean;
   lowNoticeThreshold: number;
   skin: SkinName;
+  activeRateLimitId: string;
 };
 
 export const defaultSettings: AppSettings = {
@@ -25,6 +26,7 @@ export const defaultSettings: AppSettings = {
   launchAtLogin: false,
   lowNoticeThreshold: 15,
   skin: "glass",
+  activeRateLimitId: "__default__",
 };
 
 export const skinNames = [
@@ -62,5 +64,7 @@ export function normalizeAppSettings(value: unknown): AppSettings {
     launchAtLogin: parsed.launchAtLogin === true,
     lowNoticeThreshold: normalizeLowNoticeThreshold(parsed.lowNoticeThreshold),
     skin: normalizeSkin(parsed.skin),
+    activeRateLimitId:
+      typeof parsed.activeRateLimitId === "string" ? parsed.activeRateLimitId : defaultSettings.activeRateLimitId,
   };
 }
