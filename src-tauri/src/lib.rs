@@ -8,6 +8,18 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Manager, WindowEvent};
+
+const BALL_WINDOW_LABEL: &str = "ball";
+const MAIN_WINDOW_LABEL: &str = "main";
+const SETTINGS_WINDOW_LABEL: &str = "settings";
+
+const MENU_SHOW_MAIN: &str = "show_main_panel";
+const MENU_TOGGLE_BALL: &str = "toggle_usage_ball";
+const MENU_SHOW_SETTINGS: &str = "show_settings";
+const MENU_EXIT: &str = "exit_app";
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,6 +90,17 @@ impl CodexLauncher {
         }
     }
 }
+
+#[cfg(windows)]
+fn hide_child_console(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_child_console(_: &mut Command) {}
 
 fn jsonrpc_line(id: i32, method: &str, params: Value) -> String {
     serde_json::json!({
@@ -186,6 +209,7 @@ fn collect_stderr(rx: &mpsc::Receiver<String>) -> String {
 fn spawn_codex_app_server() -> Result<std::process::Child, String> {
     let launcher = find_codex_launcher()?;
     let mut command = launcher.command();
+    hide_child_console(&mut command);
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -194,6 +218,95 @@ fn spawn_codex_app_server() -> Result<std::process::Child, String> {
     command
         .spawn()
         .map_err(|err| format!("无法启动 codex app-server：{err}"))
+}
+
+fn show_window(app: &AppHandle, label: &str) -> Result<(), String> {
+    let window = app
+        .get_webview_window(label)
+        .ok_or_else(|| format!("未找到窗口：{label}"))?;
+
+    window.show().map_err(|err| err.to_string())?;
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+    Ok(())
+}
+
+fn hide_window(app: &AppHandle, label: &str) -> Result<(), String> {
+    let window = app
+        .get_webview_window(label)
+        .ok_or_else(|| format!("未找到窗口：{label}"))?;
+
+    window.hide().map_err(|err| err.to_string())
+}
+
+fn toggle_ball_window(app: &AppHandle, toggle_item: &CheckMenuItem<tauri::Wry>) {
+    let Some(window) = app.get_webview_window(BALL_WINDOW_LABEL) else {
+        let _ = toggle_item.set_checked(false);
+        return;
+    };
+
+    let visible = window.is_visible().unwrap_or(false);
+    if visible {
+        let _ = window.hide();
+        let _ = toggle_item.set_checked(false);
+    } else {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        let _ = toggle_item.set_checked(true);
+    }
+}
+
+fn install_tray(app: &AppHandle) -> tauri::Result<()> {
+    let show_main = MenuItem::with_id(app, MENU_SHOW_MAIN, "显示主面板", true, None::<&str>)?;
+    let toggle_ball = CheckMenuItem::with_id(
+        app,
+        MENU_TOGGLE_BALL,
+        "显示悬浮球",
+        true,
+        true,
+        None::<&str>,
+    )?;
+    let show_settings = MenuItem::with_id(app, MENU_SHOW_SETTINGS, "设置", true, None::<&str>)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let exit = MenuItem::with_id(app, MENU_EXIT, "退出程序", true, None::<&str>)?;
+    let menu = Menu::with_items(
+        app,
+        &[&show_main, &toggle_ball, &show_settings, &separator, &exit],
+    )?;
+
+    let toggle_for_menu = toggle_ball.clone();
+    let mut builder = TrayIconBuilder::new()
+        .menu(&menu)
+        .tooltip("Codex 用量悬浮球")
+        .show_menu_on_left_click(false)
+        .on_menu_event(move |app, event| match event.id().as_ref() {
+            MENU_SHOW_MAIN => {
+                let _ = show_window(app, MAIN_WINDOW_LABEL);
+            }
+            MENU_TOGGLE_BALL => toggle_ball_window(app, &toggle_for_menu),
+            MENU_SHOW_SETTINGS => {
+                let _ = show_window(app, SETTINGS_WINDOW_LABEL);
+            }
+            MENU_EXIT => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| match event {
+            TrayIconEvent::Click { button, .. } if button == MouseButton::Left => {
+                let _ = show_window(tray.app_handle(), MAIN_WINDOW_LABEL);
+            }
+            TrayIconEvent::DoubleClick { button, .. } if button == MouseButton::Left => {
+                let _ = show_window(tray.app_handle(), MAIN_WINDOW_LABEL);
+            }
+            _ => {}
+        });
+
+    if let Some(icon) = app.default_window_icon().cloned() {
+        builder = builder.icon(icon);
+    }
+
+    builder.build(app)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -305,11 +418,58 @@ fn read_rate_limits() -> Result<GetAccountRateLimitsResponse, String> {
     }
 }
 
+#[tauri::command]
+fn show_main_panel(app: AppHandle) -> Result<(), String> {
+    show_window(&app, MAIN_WINDOW_LABEL)
+}
+
+#[tauri::command]
+fn hide_main_panel(app: AppHandle) -> Result<(), String> {
+    hide_window(&app, MAIN_WINDOW_LABEL)
+}
+
+#[tauri::command]
+fn show_settings_window(app: AppHandle) -> Result<(), String> {
+    show_window(&app, SETTINGS_WINDOW_LABEL)
+}
+
+#[tauri::command]
+fn hide_settings_window(app: AppHandle) -> Result<(), String> {
+    hide_window(&app, SETTINGS_WINDOW_LABEL)
+}
+
+#[tauri::command]
+fn exit_app(app: AppHandle) {
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![read_rate_limits])
+        .setup(|app| {
+            install_tray(app.handle())?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                match window.label() {
+                    BALL_WINDOW_LABEL | MAIN_WINDOW_LABEL | SETTINGS_WINDOW_LABEL => {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .invoke_handler(tauri::generate_handler![
+            read_rate_limits,
+            show_main_panel,
+            hide_main_panel,
+            show_settings_window,
+            hide_settings_window,
+            exit_app
+        ])
         .run(tauri::generate_context!())
         .expect("Codex 用量悬浮球启动失败");
 }

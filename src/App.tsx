@@ -1,16 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   AlertTriangle,
   ChevronDown,
+  Clock3,
   Languages,
   MonitorCog,
   Moon,
-  Pin,
   Power,
   RefreshCcw,
   Settings,
   Sun,
+  X,
 } from "lucide-react";
 import "./App.css";
 
@@ -45,6 +46,7 @@ type LoadState = "idle" | "loading" | "ready" | "error";
 type Language = "zh-CN" | "en-US";
 type ThemeMode = "system" | "light" | "dark";
 type ResolvedTheme = "light" | "dark";
+type WindowKind = "ball" | "main" | "settings";
 
 type AppSettings = {
   language: Language;
@@ -56,6 +58,9 @@ type Copy = {
   appAria: string;
   appEyebrow: string;
   appTitle: string;
+  ballLabel: string;
+  openMainPanel: string;
+  hideMainPanel: string;
   refresh: string;
   readFailed: string;
   shortFallback: string;
@@ -73,10 +78,10 @@ type Copy = {
   loading: string;
   waiting: string;
   updated: (time: string) => string;
-  pinPosition: string;
   settings: string;
   exit: string;
   settingsTitle: string;
+  close: string;
   language: string;
   chinese: string;
   english: string;
@@ -98,6 +103,7 @@ type Copy = {
 };
 
 const STORAGE_KEY = "codex-usage-ball-settings";
+const SETTINGS_CHANGED_EVENT = "codex-usage-ball-settings-changed";
 
 const defaultSettings: AppSettings = {
   language: "zh-CN",
@@ -110,6 +116,9 @@ const copy: Record<Language, Copy> = {
     appAria: "Codex 用量悬浮球",
     appEyebrow: "Codex 用量",
     appTitle: "剩余额度",
+    ballLabel: "剩余",
+    openMainPanel: "显示主面板",
+    hideMainPanel: "隐藏主面板",
     refresh: "刷新用量",
     readFailed: "读取 Codex 用量失败",
     shortFallback: "短期窗口",
@@ -119,7 +128,7 @@ const copy: Record<Language, Copy> = {
     credits: "Credits",
     status: "状态",
     available: "可用",
-    reached: "已触顶",
+    reached: "已受限",
     unlimited: "不限",
     limitsTitle: "模型用量桶",
     collapse: "收起",
@@ -127,10 +136,10 @@ const copy: Record<Language, Copy> = {
     loading: "正在刷新",
     waiting: "等待数据",
     updated: (time) => `${time} 更新`,
-    pinPosition: "固定位置",
     settings: "设置",
     exit: "退出",
     settingsTitle: "偏好设置",
+    close: "关闭",
     language: "语言",
     chinese: "中文",
     english: "English",
@@ -154,6 +163,9 @@ const copy: Record<Language, Copy> = {
     appAria: "Codex usage ball",
     appEyebrow: "Codex Usage",
     appTitle: "Remaining Limits",
+    ballLabel: "Left",
+    openMainPanel: "Show main panel",
+    hideMainPanel: "Hide main panel",
     refresh: "Refresh usage",
     readFailed: "Failed to read Codex usage",
     shortFallback: "Short window",
@@ -171,10 +183,10 @@ const copy: Record<Language, Copy> = {
     loading: "Refreshing",
     waiting: "Waiting for data",
     updated: (time) => `Updated ${time}`,
-    pinPosition: "Pin position",
     settings: "Settings",
     exit: "Exit",
     settingsTitle: "Preferences",
+    close: "Close",
     language: "Language",
     chinese: "中文",
     english: "English",
@@ -232,9 +244,9 @@ const mockUsage: RateLimitsResponse = {
         resetsAt: Math.floor(Date.now() / 1000) + 4 * 24 * 60 * 60,
       },
     },
-    codex_bengalfox: {
+    codex_spark: {
       credits: null,
-      limitId: "codex_bengalfox",
+      limitId: "codex_spark",
       limitName: "GPT-5.3-Codex-Spark",
       planType: "prolite",
       primary: {
@@ -251,6 +263,12 @@ const mockUsage: RateLimitsResponse = {
     },
   },
 };
+
+function getWindowKind(): WindowKind {
+  const windowKind = new URLSearchParams(window.location.search).get("window");
+  if (windowKind === "ball" || windowKind === "settings") return windowKind;
+  return "main";
+}
 
 function isTauriRuntime() {
   return Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
@@ -271,6 +289,11 @@ function readSettings(): AppSettings {
   } catch {
     return defaultSettings;
   }
+}
+
+function persistSettings(settings: AppSettings) {
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+  window.dispatchEvent(new Event(SETTINGS_CHANGED_EVENT));
 }
 
 function clampPercent(value: number) {
@@ -325,6 +348,85 @@ function resolveTheme(mode: ThemeMode, systemTheme: ResolvedTheme): ResolvedThem
   return mode === "system" ? systemTheme : mode;
 }
 
+function useAppSettings() {
+  const [settings, setSettings] = useState<AppSettings>(readSettings);
+  const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(getSystemTheme);
+
+  const updateSettings = useCallback((patch: Partial<AppSettings>) => {
+    setSettings((current) => {
+      const next = { ...current, ...patch };
+      persistSettings(next);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    const syncSettings = () => setSettings(readSettings());
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === STORAGE_KEY) syncSettings();
+    };
+
+    window.addEventListener("storage", handleStorage);
+    window.addEventListener(SETTINGS_CHANGED_EVENT, syncSettings);
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener(SETTINGS_CHANGED_EVENT, syncSettings);
+    };
+  }, []);
+
+  useEffect(() => {
+    const query = window.matchMedia("(prefers-color-scheme: dark)");
+    const handleChange = () => setSystemTheme(query.matches ? "dark" : "light");
+
+    handleChange();
+    query.addEventListener("change", handleChange);
+    return () => query.removeEventListener("change", handleChange);
+  }, []);
+
+  const resolvedTheme = resolveTheme(settings.themeMode, systemTheme);
+  const text = copy[settings.language];
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = resolvedTheme;
+    document.documentElement.lang = settings.language;
+  }, [resolvedTheme, settings.language]);
+
+  return { settings, updateSettings, resolvedTheme, text };
+}
+
+function useUsageData(refreshIntervalSec: 30 | 60) {
+  const [usage, setUsage] = useState<RateLimitsResponse | null>(null);
+  const [state, setState] = useState<LoadState>("idle");
+  const [error, setError] = useState<string | null>(null);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
+
+  const loadUsage = useCallback(async () => {
+    setState("loading");
+    setError(null);
+
+    try {
+      const data = isTauriRuntime()
+        ? await invoke<RateLimitsResponse>("read_rate_limits")
+        : await Promise.resolve(mockUsage);
+
+      setUsage(data);
+      setLastUpdatedAt(new Date());
+      setState("ready");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setState("error");
+    }
+  }, []);
+
+  useEffect(() => {
+    loadUsage();
+    const timer = window.setInterval(loadUsage, refreshIntervalSec * 1000);
+    return () => window.clearInterval(timer);
+  }, [loadUsage, refreshIntervalSec]);
+
+  return { usage, state, error, lastUpdatedAt, loadUsage };
+}
+
 function WindowMetric({
   fallbackName,
   language,
@@ -360,7 +462,7 @@ function ChoiceButton<T extends string | number>({
   value,
 }: {
   active: boolean;
-  children: React.ReactNode;
+  children: ReactNode;
   onClick: (value: T) => void;
   value: T;
 }) {
@@ -375,64 +477,136 @@ function ChoiceButton<T extends string | number>({
   );
 }
 
-function App() {
-  const [usage, setUsage] = useState<RateLimitsResponse | null>(null);
-  const [state, setState] = useState<LoadState>("idle");
-  const [error, setError] = useState<string | null>(null);
-  const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
-  const [settings, setSettings] = useState<AppSettings>(readSettings);
-  const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(getSystemTheme);
-  const [showSettings, setShowSettings] = useState(false);
+function SettingsFields({
+  settings,
+  text,
+  updateSettings,
+}: {
+  settings: AppSettings;
+  text: Copy;
+  updateSettings: (patch: Partial<AppSettings>) => void;
+}) {
+  return (
+    <section className="settings-fields">
+      <div className="setting-row">
+        <span>
+          <Languages size={15} />
+          {text.language}
+        </span>
+        <div className="segmented">
+          <ChoiceButton
+            active={settings.language === "zh-CN"}
+            onClick={(language: Language) => updateSettings({ language })}
+            value="zh-CN"
+          >
+            {text.chinese}
+          </ChoiceButton>
+          <ChoiceButton
+            active={settings.language === "en-US"}
+            onClick={(language: Language) => updateSettings({ language })}
+            value="en-US"
+          >
+            {text.english}
+          </ChoiceButton>
+        </div>
+      </div>
+
+      <div className="setting-row">
+        <span>
+          <MonitorCog size={15} />
+          {text.theme}
+        </span>
+        <div className="segmented segmented-compact">
+          <ChoiceButton
+            active={settings.themeMode === "system"}
+            onClick={(themeMode: ThemeMode) => updateSettings({ themeMode })}
+            value="system"
+          >
+            {text.followSystem}
+          </ChoiceButton>
+          <ChoiceButton
+            active={settings.themeMode === "light"}
+            onClick={(themeMode: ThemeMode) => updateSettings({ themeMode })}
+            value="light"
+          >
+            <Sun size={14} />
+            {text.light}
+          </ChoiceButton>
+          <ChoiceButton
+            active={settings.themeMode === "dark"}
+            onClick={(themeMode: ThemeMode) => updateSettings({ themeMode })}
+            value="dark"
+          >
+            <Moon size={14} />
+            {text.dark}
+          </ChoiceButton>
+        </div>
+      </div>
+
+      <div className="setting-row">
+        <span>
+          <Clock3 size={15} />
+          {text.refreshFrequency}
+        </span>
+        <div className="segmented">
+          <ChoiceButton
+            active={settings.refreshIntervalSec === 60}
+            onClick={(refreshIntervalSec: 30 | 60) => updateSettings({ refreshIntervalSec })}
+            value={60}
+          >
+            {text.seconds(60)}
+          </ChoiceButton>
+          <ChoiceButton
+            active={settings.refreshIntervalSec === 30}
+            onClick={(refreshIntervalSec: 30 | 60) => updateSettings({ refreshIntervalSec })}
+            value={30}
+          >
+            {text.seconds(30)}
+          </ChoiceButton>
+        </div>
+      </div>
+
+      <div className="setting-row inline-setting">
+        <span>{text.lowNotice}</span>
+        <em>{text.noticeAt15}</em>
+      </div>
+
+      <div className="setting-row inline-setting">
+        <span>{text.startup}</span>
+        <em>{text.comingSoon}</em>
+      </div>
+    </section>
+  );
+}
+
+function BallView() {
+  const { settings, resolvedTheme, text } = useAppSettings();
+  const { usage, state } = useUsageData(settings.refreshIntervalSec);
+  const activeLimit = usage?.rateLimits ?? null;
+  const primaryRemaining = remainingPercent(activeLimit?.primary ?? null);
+  const primaryTone = getTone(primaryRemaining);
+
+  return (
+    <main className="ball-shell" data-tauri-drag-region data-theme={resolvedTheme}>
+      <button
+        className={`usage-ball compact-ball usage-ball-${primaryTone}`}
+        type="button"
+        aria-label={text.openMainPanel}
+        title={text.openMainPanel}
+        onClick={() => void invoke("show_main_panel")}
+      >
+        <span>{primaryRemaining === null ? "--" : primaryRemaining}</span>
+        <small>%</small>
+        <b>{state === "loading" ? text.loading : text.ballLabel}</b>
+      </button>
+    </main>
+  );
+}
+
+function MainPanelView() {
+  const { settings, resolvedTheme, text } = useAppSettings();
+  const { usage, state, error, lastUpdatedAt, loadUsage } = useUsageData(settings.refreshIntervalSec);
   const [showLimits, setShowLimits] = useState(true);
-
-  const text = copy[settings.language];
-  const resolvedTheme = resolveTheme(settings.themeMode, systemTheme);
-
-  const updateSettings = useCallback((patch: Partial<AppSettings>) => {
-    setSettings((current) => ({ ...current, ...patch }));
-  }, []);
-
-  const loadUsage = useCallback(async () => {
-    setState("loading");
-    setError(null);
-
-    try {
-      const data = isTauriRuntime()
-        ? await invoke<RateLimitsResponse>("read_rate_limits")
-        : await Promise.resolve(mockUsage);
-
-      setUsage(data);
-      setLastUpdatedAt(new Date());
-      setState("ready");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setState("error");
-    }
-  }, []);
-
-  useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
-  }, [settings]);
-
-  useEffect(() => {
-    document.documentElement.dataset.theme = resolvedTheme;
-    document.documentElement.lang = settings.language;
-  }, [resolvedTheme, settings.language]);
-
-  useEffect(() => {
-    const query = window.matchMedia("(prefers-color-scheme: dark)");
-    const handleChange = () => setSystemTheme(query.matches ? "dark" : "light");
-
-    handleChange();
-    query.addEventListener("change", handleChange);
-    return () => query.removeEventListener("change", handleChange);
-  }, []);
-
-  useEffect(() => {
-    loadUsage();
-    const timer = window.setInterval(loadUsage, settings.refreshIntervalSec * 1000);
-    return () => window.clearInterval(timer);
-  }, [loadUsage, settings.refreshIntervalSec]);
 
   const activeLimit = usage?.rateLimits ?? null;
   const limits = useMemo(() => {
@@ -445,21 +619,31 @@ function App() {
 
   return (
     <main className="app-shell" data-tauri-drag-region data-theme={resolvedTheme}>
-      <section className={`usage-ball usage-ball-${primaryTone}`} aria-label={text.appAria}>
-        <span>{primaryRemaining === null ? "--" : primaryRemaining}</span>
-        <small>%</small>
-      </section>
-
-      <section className="panel">
+      <section className="panel main-panel" aria-label={text.appAria}>
         <header className="panel-header">
           <div>
             <p className="eyebrow">{text.appEyebrow}</p>
             <h1>{text.appTitle}</h1>
           </div>
-          <button className="icon-button" type="button" aria-label={text.refresh} onClick={loadUsage}>
-            <RefreshCcw size={18} />
-          </button>
+          <div className="header-actions">
+            <button className="icon-button" type="button" aria-label={text.refresh} onClick={loadUsage}>
+              <RefreshCcw size={18} />
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              aria-label={text.settings}
+              onClick={() => void invoke("show_settings_window")}
+            >
+              <Settings size={18} />
+            </button>
+          </div>
         </header>
+
+        <section className={`headline headline-${primaryTone}`}>
+          <span>{text.ballLabel}</span>
+          <strong>{primaryRemaining === null ? "--" : `${primaryRemaining}%`}</strong>
+        </section>
 
         {state === "error" ? (
           <section className="notice">
@@ -529,100 +713,6 @@ function App() {
           ) : null}
         </section>
 
-        {showSettings ? (
-          <section className="settings-sheet">
-            <div className="settings-title">
-              <Settings size={16} />
-              <strong>{text.settingsTitle}</strong>
-            </div>
-
-            <div className="setting-row">
-              <span>
-                <Languages size={15} />
-                {text.language}
-              </span>
-              <div className="segmented">
-                <ChoiceButton
-                  active={settings.language === "zh-CN"}
-                  onClick={(language: Language) => updateSettings({ language })}
-                  value="zh-CN"
-                >
-                  {text.chinese}
-                </ChoiceButton>
-                <ChoiceButton
-                  active={settings.language === "en-US"}
-                  onClick={(language: Language) => updateSettings({ language })}
-                  value="en-US"
-                >
-                  {text.english}
-                </ChoiceButton>
-              </div>
-            </div>
-
-            <div className="setting-row">
-              <span>
-                <MonitorCog size={15} />
-                {text.theme}
-              </span>
-              <div className="segmented segmented-compact">
-                <ChoiceButton
-                  active={settings.themeMode === "system"}
-                  onClick={(themeMode: ThemeMode) => updateSettings({ themeMode })}
-                  value="system"
-                >
-                  {text.followSystem}
-                </ChoiceButton>
-                <ChoiceButton
-                  active={settings.themeMode === "light"}
-                  onClick={(themeMode: ThemeMode) => updateSettings({ themeMode })}
-                  value="light"
-                >
-                  <Sun size={14} />
-                  {text.light}
-                </ChoiceButton>
-                <ChoiceButton
-                  active={settings.themeMode === "dark"}
-                  onClick={(themeMode: ThemeMode) => updateSettings({ themeMode })}
-                  value="dark"
-                >
-                  <Moon size={14} />
-                  {text.dark}
-                </ChoiceButton>
-              </div>
-            </div>
-
-            <div className="setting-row">
-              <span>{text.refreshFrequency}</span>
-              <div className="segmented">
-                <ChoiceButton
-                  active={settings.refreshIntervalSec === 60}
-                  onClick={(refreshIntervalSec: 30 | 60) => updateSettings({ refreshIntervalSec })}
-                  value={60}
-                >
-                  {text.seconds(60)}
-                </ChoiceButton>
-                <ChoiceButton
-                  active={settings.refreshIntervalSec === 30}
-                  onClick={(refreshIntervalSec: 30 | 60) => updateSettings({ refreshIntervalSec })}
-                  value={30}
-                >
-                  {text.seconds(30)}
-                </ChoiceButton>
-              </div>
-            </div>
-
-            <div className="setting-row">
-              <span>{text.lowNotice}</span>
-              <em>{text.noticeAt15}</em>
-            </div>
-
-            <div className="setting-row">
-              <span>{text.startup}</span>
-              <em>{text.comingSoon}</em>
-            </div>
-          </section>
-        ) : null}
-
         <footer>
           <span>
             {state === "loading"
@@ -632,18 +722,20 @@ function App() {
                 : text.waiting}
           </span>
           <div className="footer-actions">
-            <button className="icon-button" type="button" aria-label={text.pinPosition}>
-              <Pin size={16} />
+            <button
+              className="icon-button"
+              type="button"
+              aria-label={text.hideMainPanel}
+              onClick={() => void invoke("hide_main_panel")}
+            >
+              <X size={16} />
             </button>
             <button
-              className={`icon-button${showSettings ? " icon-button-active" : ""}`}
+              className="icon-button"
               type="button"
-              aria-label={text.settings}
-              onClick={() => setShowSettings((current) => !current)}
+              aria-label={text.exit}
+              onClick={() => void invoke("exit_app")}
             >
-              <Settings size={16} />
-            </button>
-            <button className="icon-button" type="button" aria-label={text.exit}>
               <Power size={16} />
             </button>
           </div>
@@ -651,6 +743,40 @@ function App() {
       </section>
     </main>
   );
+}
+
+function SettingsView() {
+  const { settings, updateSettings, resolvedTheme, text } = useAppSettings();
+
+  return (
+    <main className="settings-shell" data-theme={resolvedTheme}>
+      <section className="settings-panel">
+        <header className="settings-header" data-tauri-drag-region>
+          <div>
+            <p className="eyebrow">{text.appEyebrow}</p>
+            <h1>{text.settingsTitle}</h1>
+          </div>
+          <button
+            className="icon-button"
+            type="button"
+            aria-label={text.close}
+            onClick={() => void invoke("hide_settings_window")}
+          >
+            <X size={18} />
+          </button>
+        </header>
+
+        <SettingsFields settings={settings} text={text} updateSettings={updateSettings} />
+      </section>
+    </main>
+  );
+}
+
+function App() {
+  const windowKind = getWindowKind();
+  if (windowKind === "ball") return <BallView />;
+  if (windowKind === "settings") return <SettingsView />;
+  return <MainPanelView />;
 }
 
 export default App;

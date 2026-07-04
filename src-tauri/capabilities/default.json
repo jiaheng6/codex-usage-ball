@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "主窗口能力配置",
-  "windows": ["main"],
+  "description": "主窗口、悬浮球和设置窗口能力配置",
+  "windows": ["ball", "main", "settings"],
   "permissions": [
     "core:default",
     "opener:default"
