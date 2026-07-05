@@ -659,28 +659,46 @@ function useUsageData(refreshIntervalSec: 30 | 60) {
   const [state, setState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
+  const usageRequestRef = useRef<Promise<void> | null>(null);
 
   const loadUsage = useCallback(async () => {
-    setState("loading");
-    setError(null);
-
-    try {
-      const data = isTauriRuntime()
-        ? await invoke<RateLimitsResponse>("read_rate_limits")
-        : await Promise.resolve(mockUsage);
-
-      setUsage(data);
-      setLastUpdatedAt(new Date());
-      setState("ready");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setState("error");
+    if (usageRequestRef.current) {
+      return usageRequestRef.current;
     }
+
+    const request = (async () => {
+      setState((current) => (current === "loading" ? current : "loading"));
+      setError(null);
+
+      try {
+        const data = isTauriRuntime()
+          ? await invoke<RateLimitsResponse>("read_rate_limits")
+          : await Promise.resolve(mockUsage);
+
+        setUsage(data);
+        setLastUpdatedAt(new Date());
+        setState("ready");
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+        setState("error");
+      }
+    })();
+
+    usageRequestRef.current = request;
+    request.finally(() => {
+      if (usageRequestRef.current === request) {
+        usageRequestRef.current = null;
+      }
+    });
+
+    return request;
   }, []);
 
   useEffect(() => {
-    loadUsage();
-    const timer = window.setInterval(loadUsage, refreshIntervalSec * 1000);
+    void loadUsage();
+    const timer = window.setInterval(() => {
+      void loadUsage();
+    }, refreshIntervalSec * 1000);
     return () => window.clearInterval(timer);
   }, [loadUsage, refreshIntervalSec]);
 
